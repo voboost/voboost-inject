@@ -1,0 +1,5 @@
+[wrap-git]
+url = https://github.com/frida/frida-gum.git
+revision = 17.11.0
+directory = frida-gum
+depth = 1

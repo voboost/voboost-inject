@@ -1,0 +1,5 @@
+[wrap-git]
+url = https://github.com/frida/frida-core.git
+revision = 17.11.0
+directory = frida-core
+depth = 1
