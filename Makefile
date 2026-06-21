@@ -1,8 +1,13 @@
 BUILD_DIR ?= build
 
-# Prefix where make init puts the source-built io.elementary.vala-lint.
-# Add $(TOOLS_PREFIX)/bin to PATH so `make lint` and check find it.
-TOOLS_PREFIX ?= $(HOME)/.local
+# Local tools directory inside the project for project-specific build tools.
+# This keeps all project dependencies self-contained and reproducible.
+TOOLS_DIR ?= $(PWD)/.tools
+export PATH := $(TOOLS_DIR)/bin:$(PATH)
+
+# Ad-hoc code signing for frida-core's helper on macOS development builds.
+# Override with a real Apple Developer identity for distribution.
+export MACOS_CERTID ?= -
 
 # Pinned io.elementary.vala-lint revision (no Homebrew/apt package exists).
 VALA_LINT_REPO ?= https://github.com/vala-lang/vala-lint.git
@@ -22,7 +27,7 @@ init:
 		echo "init: Linux (apt)"; \
 		sudo apt-get update; \
 		sudo apt-get install -y valac meson ninja-build bsdiff uncrustify \
-			libjson-glib-dev libglib2.0-dev pkg-config git openssl \
+			libjson-glib-dev libglib2.0-dev pkg-config git openssl curl \
 			libvala-dev libgee-0.8-dev; \
 	else \
 		echo "init: unsupported OS '$$os'. Use WSL2 + Ubuntu." >&2; \
@@ -33,13 +38,41 @@ init:
 	git clone --depth 1 --branch "$(VALA_LINT_REV)" "$(VALA_LINT_REPO)" "$$src"; \
 	extra_args=""; \
 	if [ "$$os" = "Darwin" ]; then extra_args="-Dc_args=-DFNM_EXTMATCH=0"; fi; \
-	meson setup "$$src/build" "$$src" --prefix "$(TOOLS_PREFIX)" $$extra_args; \
-	ninja -C "$$src/build"; \
+	lint_valac=$$(which -a valac 2>/dev/null | while read -r p; do \
+		"$$p" --version 2>/dev/null | grep -q frida || { echo "$$p"; break; }; \
+	done); \
+	if [ -z "$$lint_valac" ]; then \
+		echo "init: no system (non-frida) valac found for vala-lint build" >&2; \
+		exit 1; \
+	fi; \
+	echo "init: using $$lint_valac for vala-lint (needs matching libvala)"; \
+	VALAC="$$lint_valac" meson setup "$$src/build" "$$src" --prefix "$(TOOLS_DIR)" $$extra_args; \
+	VALAC="$$lint_valac" ninja -C "$$src/build"; \
 	ninja -C "$$src/build" install; \
 	rm -rf "$$src"; \
-	echo "init: vala-lint installed. Ensure $(TOOLS_PREFIX)/bin is on PATH."
-	$(MAKE) setup
+	echo "init: vala-lint installed (PATH gets $(TOOLS_DIR)/bin from this Makefile)."
+	meson subprojects download
+	@if valac --version 2>/dev/null | grep -q -- '-frida'; then \
+		echo "init: frida-patched valac already present; skipping its build"; \
+	else \
+		echo "init: building the frida-patched valac (frida-core hard-requires it)"; \
+		releng_rev=$$(git -C subprojects/frida-core ls-tree HEAD releng | awk '{ print $$3 }'); \
+		vala_rev=$$(curl -fsSL "https://raw.githubusercontent.com/frida/releng/$$releng_rev/deps.toml" \
+			| sed -n '/^\[vala\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' | head -n 1); \
+		test -n "$$vala_rev" || { echo "init: cannot resolve the vala fork pin" >&2; exit 1; }; \
+		echo "init: frida/vala revision $$vala_rev (from releng $$releng_rev deps.toml)"; \
+		src=$$(mktemp -d); \
+		git -C "$$src" init -q; \
+		git -C "$$src" remote add origin https://github.com/frida/vala.git; \
+		git -C "$$src" fetch -q --depth 1 origin "$$vala_rev"; \
+		git -C "$$src" checkout -q --detach FETCH_HEAD; \
+		meson setup "$$src/build" "$$src" --prefix "$(TOOLS_DIR)"; \
+		ninja -C "$$src/build" install; \
+		rm -rf "$$src"; \
+	fi
+	rm -rf $(BUILD_DIR)
 	$(MAKE) key-dev
+	$(MAKE) setup
 
 setup:
 	meson setup $(BUILD_DIR)
@@ -82,7 +115,7 @@ check:
 	echo "All required tools present."
 
 key-dev:
-	@keydir=keys; priv=$$keydir/dev-private.pem; pub=$$keydir/dev-public.pem; \
+	@keydir=config; priv=$$keydir/key-dev-private.pem; pub=$$keydir/key-dev-public.pem; \
 	mkdir -p "$$keydir"; \
 	if [ -f "$$priv" ]; then \
 		echo "Dev private key already exists at $$priv; leaving it untouched." >&2; \

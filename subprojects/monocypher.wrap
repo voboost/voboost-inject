@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/LoupVaillant/Monocypher.git
+revision = 4.0.2
+depth = 1
+patch_directory = monocypher
+
+[provide]
+monocypher = monocypher_dep
