@@ -138,13 +138,14 @@ public void start() {
     var app_watcher = new AppZoneWatcher(APP_ZONE);
     var status = new Status(
         Path.build_filename(APP_ZONE, "inject-status.json"));
+    var ota = new Ota(ROOT_ZONE, trust);
     // Single source of truth for the version: the generated
     // DAEMON_VERSION (meson project () version). Only the daemon entry
     // point references it, so host tests need no generated version src.
     status.daemon_version = DAEMON_VERSION;
     this.supervisor = new Supervisor(
         ROOT_ZONE, APP_ZONE, trust, manifest, frida, safety, watcher,
-        app_watcher, status);
+        app_watcher, status, ota);
     this.supervisor.run.begin((obj, res) => {
                 this.supervisor.run.end(res);
             });

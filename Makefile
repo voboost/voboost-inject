@@ -156,3 +156,62 @@ verify-sig:
 	@test -n "$(FILE)" || { echo "verify-sig: FILE=<manifest> required"  >&2; exit 2; }
 	openssl pkeyutl -verify -pubin -inkey "$(KEY)" -rawin -in "$(FILE)" -sigfile "$(FILE).sig"
 	@echo "Verified $(FILE).sig against $(KEY)"
+
+.PHONY: release-manifest
+
+# OTA release-manifest generator (owned by the ota change). Scans DIR for files,
+# labels every entry with CHANNEL, stamps VERSION, and emits unsigned
+# build/release-manifest.json with per-file path/channel/sha256/size/version.
+# Signing is the existing `make sign` (the ci release workflow calls both); the
+# daemon re-verifies the signed manifest with the embedded key on apply.
+# stat is probed both ways (Linux -c%s, macOS -f%z) so it runs locally and in CI.
+release-manifest:
+	@test -n "$(DIR)"     || { echo "release-manifest: DIR=<release-dir> required"         >&2; exit 2; }
+	@test -n "$(CHANNEL)" || { echo "release-manifest: CHANNEL=<agents|core|app> required"  >&2; exit 2; }
+	@test -n "$(VERSION)" || { echo "release-manifest: VERSION=<semver> required"           >&2; exit 2; }
+	@test -d "$(DIR)"     || { echo "release-manifest: DIR $(DIR) is not a directory"       >&2; exit 2; }
+	@mkdir -p build; out=build/release-manifest.json; \
+	{ \
+	  echo '{'; \
+	  echo '  "version": "$(VERSION)",'; \
+	  echo '  "channel": "$(CHANNEL)",'; \
+	  printf '  "files": [\n'; \
+	  first=1; \
+	  ( cd "$(DIR)" && find . -type f | sed 's|^\./||' | sort ) | while read -r rel; do \
+	    f="$(DIR)/$$rel"; \
+	    sha=$$(openssl dgst -sha256 -hex "$$f" | awk '{ print $$NF }'); \
+	    sz=$$(stat -c%s "$$f" 2>/dev/null || stat -f%z "$$f" 2>/dev/null); \
+	    jsonesc=$$(printf '%s' "$$rel" | sed 's/\\/\\\\/g; s/"/\\"/g'); \
+	    [ "$$first" = 1 ] || printf ',\n'; first=0; \
+	    printf '    {"path":"%s","channel":"$(CHANNEL)","sha256":"%s","size":%s,"version":"$(VERSION)"}' \
+	      "$$jsonesc" "$$sha" "$$sz"; \
+	  done; \
+	  printf '\n  ]\n'; \
+	  echo '}'; \
+	} > "$$out"; \
+	echo "Wrote $$out"
+
+.PHONY: device-rearm
+
+# OTA system-OTA survival (owned by the ota change). After a system OTA reverts
+# /system, the operator runs this on-device via adb to restore the guarded
+# init-hook block that launches /data/voboost/voboost-inject. Idempotent: a hook
+# that already contains the block is left untouched. HOOK=<on-device path>.
+# Requires root (/system remounted RW). The restart-on-exit behavior the core
+# update depends on is set up by initial device provisioning (out of scope); this
+# step only restores the launch of the stable path.
+device-rearm:
+	@test -n "$(HOOK)" || { echo "device-rearm: HOOK=<on-device init-hook path> required" >&2; exit 2; }
+	@test -w "$(HOOK)" || { echo "device-rearm: $(HOOK) not writable (remount /system RW as root)" >&2; exit 2; }
+	@begin='# >>> voboost-inject (do not edit)'; \
+	end='# <<< voboost-inject'; \
+	if grep -qF "$$begin" "$(HOOK)" 2>/dev/null; then \
+	  echo "device-rearm: hook already armed; nothing to do"; \
+	else \
+	  printf '\n%s\n' "$$begin" >> "$(HOOK)"; \
+	  printf '%s\n' "# Launches /data/voboost/voboost-inject once; init/watchdog restarts on exit." >> "$(HOOK)"; \
+	  printf '%s\n' "# No fork-loop: single-instance is enforced by the daemon (pidfile + flock)." >> "$(HOOK)"; \
+	  printf '%s\n' "exec /data/voboost/voboost-inject" >> "$(HOOK)"; \
+	  printf '%s\n' "$$end" >> "$(HOOK)"; \
+	  echo "device-rearm: armed $(HOOK)"; \
+	fi
