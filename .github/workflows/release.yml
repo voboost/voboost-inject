@@ -1,0 +1,151 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least privilege: checkout needs contents:read; upload-artifact@v4 needs
+# actions:write to attach the artifact to the workflow run.
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache make init result
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools
+            subprojects
+          key: init-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'Makefile') }}
+
+      - name: Provision (make init)
+        run: make init
+
+      # CI gate (ci-versioning): meson.build is the single source of truth. Fail
+      # fast — before the expensive NDK setup and Android cross-build — if the
+      # tag does not match v$version. No signing or publishing happens on a
+      # mismatch.
+      - name: Validate version
+        run: |
+          version=$(meson introspect build --projectinfo \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+          tag="${GITHUB_REF_NAME}"
+          echo "meson.build version: $version"
+          echo "tag: $tag"
+          test "v$version" = "$tag" || {
+            echo "tag $tag does not match meson.build version v$version" >&2
+            exit 1
+          }
+
+      # Self-gate: ci.yml and release.yml are independent workflows (both fire
+      # on a tag push), so the release re-runs make lint and make test before
+      # building — a tag cannot bypass the quality gates and publish a red commit.
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      # Android NDK for the arm64-v8a cross-build. make init does not provision
+      # it (external prerequisite); pin the LTS release for reproducible builds.
+      #
+      # nttld/setup-ndk downloads the NDK, adds its ROOT to PATH, and exposes the
+      # install path as the `ndk-path` output — but it does NOT put the
+      # cross-toolchain bin (where aarch64-linux-android-clang and llvm-strip
+      # live) on PATH, nor set ANDROID_NDK_HOME/ROOT (the action's own README has
+      # the consumer do that). The next step does both, so the bare tool names in
+      # config/android-cross.ini and the llvm-strip step resolve.
+      #
+      # SHA-pinned (not @v1): this third-party action runs in the workflow that
+      # handles SIGNING_KEY, so its supply chain is pinned to an immutable
+      # commit. First-party actions/*@v4 follow the project convention. ndk-version
+      # still pins the NDK itself to r27d.
+      - name: Set up Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        with:
+          ndk-version: r27d
+
+      # Expose the NDK to the cross-build: ANDROID_NDK_HOME/ROOT for tooling that
+      # reads it, and the LLVM prebuilt bin on $GITHUB_PATH so the cross-compiler
+      # and llvm-strip named in config/android-cross.ini resolve in later steps.
+      # linux-x86_64 matches the ubuntu-latest runner.
+      - name: Put NDK toolchain on PATH
+        run: |
+          ndk="${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          echo "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # Release-only cross-build for the device (arm64-v8a, fully static).
+      - name: Build device binary (release-only, arm64)
+        run: make build-android
+
+      # Strip the device binary for the published release artifact. meson's
+      # `strip` option (config/android-cross.ini) applies at install time, not
+      # during `ninja`, so `make build-android` leaves the symbol table in; the
+      # release artifact is the stripped ("installed") binary (build-and-signing).
+      # llvm-strip is on PATH from setup-ndk — the same tool the cross-file names.
+      - name: Strip device binary
+        run: llvm-strip build-android/voboost-inject
+
+      # Stage only the intended release artifact(s) into a clean directory so
+      # the manifest generator (ota) scans release files, not meson build noise
+      # (build.ninja, meson-info/, object files, subproject artefacts). The
+      # device binary is the core channel.
+      - name: Stage release artifacts
+        run: |
+          mkdir -p dist
+          cp build-android/voboost-inject dist/
+
+      # Generate the OTA release manifest (owned by the ota change) from the
+      # clean staging dir; ci signs and publishes it below. The version was
+      # validated up front; re-read it here (each step is a fresh shell).
+      - name: Generate release manifest
+        run: |
+          version=$(meson introspect build --projectinfo \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+          # make release-manifest (ota) scans the clean staging dir (DIR) and
+          # writes build/release-manifest.json (per-file sha256/size/version),
+          # labelling every file with the given channel.
+          make release-manifest DIR=dist CHANNEL=core VERSION="$version"
+
+      # Sign the OTA release manifest with the ed25519 private key from CI
+      # secrets. Signing the manifest transitively authenticates every listed
+      # file via its in-manifest sha256 (the ota trust model). The private key is
+      # written to a temp file (umask 077); the trap removes it even on failure.
+      # Never echoed. Non-release builds never reach this step.
+      - name: Sign and verify release manifest
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          test -n "$SIGNING_KEY" || {
+            echo "release: SIGNING_KEY secret is empty; set it before tagging a release" >&2
+            exit 1
+          }
+          umask 077
+          keyfile=$(mktemp)
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s' "$SIGNING_KEY" > "$keyfile"
+          make sign       KEY="$keyfile"               FILE=build/release-manifest.json
+          make verify-sig KEY=config/release-public.pem FILE=build/release-manifest.json
+          rm -f "$keyfile"
+
+      # Publish the signed device binary and the signed OTA release manifest
+      # (with its .sig). The manifest's channel field groups files logically.
+      - name: Publish signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: voboost-inject-${{ github.ref_name }}
+          path: |
+            build-android/voboost-inject
+            build/release-manifest.json
+            build/release-manifest.json.sig
+          if-no-files-found: error

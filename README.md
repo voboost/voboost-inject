@@ -6,8 +6,8 @@ signed agents into target processes.
 
 This repository is spec-driven. The source of truth for behavior lives under
 `openspec/`. Implementation is staged across changes in the order
-`init -> inject -> ci -> ota`. The `init` and `inject` changes are implemented;
-the rest is planned in `openspec/changes/`.
+`init -> inject -> ci -> ota`. The `init`, `inject`, and `ci` changes are
+implemented; the `ota` change is planned in `openspec/changes/`.
 
 ## Quick start (fresh clone)
 
@@ -17,18 +17,19 @@ make build    # build the daemon binary
 make test     # host-side tests (device-free)
 ```
 
-`make init` runs three steps in order: installs the toolchain, runs setup,
-then generates the dev keypair:
+`make init` runs three steps in order: installs the toolchain, generates the
+dev keypair, then runs setup:
 
 - **toolchain install** installs the OS-package tools, builds
   `io.elementary.vala-lint` from a pinned source revision (tag `0.1.0`),
   builds the frida-patched `valac` (frida-core requires it), and fetches the
   frida subproject wraps. Tools are installed into `.tools/` (project-local,
   gitignored). The frida-patched valac is prepended to `PATH` via the Makefile.
-- **setup** runs `meson setup build`.
 - **key-dev** generates a local ed25519 dev keypair at
   `config/key-dev-private.pem` (gitignored) and `config/key-dev-public.pem`
-  (committed, baked into the binary at build time).
+  (committed). It runs before setup because `meson setup` bakes the public key
+  into the binary via a custom_target.
+- **setup** runs `meson setup build`.
 
 ## Project layout
 
@@ -36,8 +37,8 @@ then generates the dev keypair:
 src/                  Vala daemon source (11 modules + VAPI bindings)
 test/                 Host-side unit tests + integration test plan
 config/               Build configs (uncrustify, vala-lint, cross-file, dev keys)
-openspec/specs/       Main specifications (9 specs)
-openspec/changes/     OpenSpec changes (inject archived, ci/ota planned)
+openspec/specs/       Main specifications (13 specs)
+openspec/changes/     OpenSpec changes (init, inject, ci archived; ota planned)
 subprojects/          Pinned frida git wraps (fetched by make init)
 .tools/               Built tools (frida-patched valac, vala-lint; gitignored)
 ```
@@ -122,6 +123,34 @@ only in CI secrets; locally you use the dev keypair from `make key-dev`. The
 public key (`config/key-dev-public.pem`) is baked into the binary at build time
 via a meson `custom_target`. Signature and hash verification is always
 enabled — there is no mode that disables it.
+
+## Versioning
+
+The project version lives in `meson.build` `project(version: ...)` (single source
+of truth, baseline `1.0.0-beta1`, set by the `inject` change). CI consumes it and
+never defines it elsewhere. During early development the pre-release postfix is
+bumped manually before each release tag:
+
+    1.0.0-beta1 -> 1.0.0-beta2 -> ... -> 1.0.0-rc1 -> 1.0.0
+
+Steps for each release:
+
+1. Edit `meson.build`: increment the postfix (e.g. `1.0.0-beta1` -> `1.0.0-beta2`).
+2. Commit, then push the matching tag (e.g. `v1.0.0-beta2`).
+3. The release workflow validates `v$version == $tag` and fails if they diverge.
+
+## Release keys
+
+The production signing public key is `config/release-public.pem`, committed by a
+maintainer; the matching private key lives only in the CI secret `SIGNING_KEY`
+and is never committed or printed. Generate a release keypair:
+
+    openssl genpkey -algorithm ed25519 -out config/release-private.pem
+    openssl pkey -in config/release-private.pem -pubout -out config/release-public.pem
+    # store config/release-private.pem as the CI secret SIGNING_KEY, then delete it locally
+
+For `beta1` the dev keypair (`config/key-dev-*`, from `make key-dev`) may be
+reused as the release keypair — rotate before a real release.
 
 ## Android cross-compilation
 
