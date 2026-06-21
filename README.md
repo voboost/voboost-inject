@@ -6,41 +6,55 @@ signed agents into target processes.
 
 This repository is spec-driven. The source of truth for behavior lives under
 `openspec/`. Implementation is staged across changes in the order
-`init -> inject -> ci -> ota`. This document covers the developer environment
-provisioned by the `init` change.
+`init -> inject -> ci -> ota`. The `init` and `inject` changes are implemented;
+the rest is planned in `openspec/changes/`.
 
 ## Quick start (fresh clone)
 
 ```sh
-make init     # provision the whole environment (see below)
-make build    # build the binary (daemon targets land with the inject change)
+make init     # provision the whole environment
+make build    # build the daemon binary
+make test     # host-side tests (device-free)
 ```
 
 `make init` runs three steps in order: installs the toolchain, runs setup,
 then generates the dev keypair:
 
-- **toolchain install** installs the OS-package tools and builds
-  `io.elementary.vala-lint` from a pinned source revision (tag `0.1.0`). It has
-  **no Homebrew and no apt package**, so it cannot be installed any other way.
-  The build is installed into `$(HOME)/.local`; make sure `$(HOME)/.local/bin`
-  is on your `PATH`.
-- **setup** runs `meson setup build`, fetching the pinned frida sources into
-  `subprojects/`.
-- **key-dev** generates a local ed25519 dev keypair (private key gitignored).
+- **toolchain install** installs the OS-package tools, builds
+  `io.elementary.vala-lint` from a pinned source revision (tag `0.1.0`),
+  builds the frida-patched `valac` (frida-core requires it), and fetches the
+  frida subproject wraps. Tools are installed into `.tools/` (project-local,
+  gitignored). The frida-patched valac is prepended to `PATH` via the Makefile.
+- **setup** runs `meson setup build`.
+- **key-dev** generates a local ed25519 dev keypair at
+  `config/key-dev-private.pem` (gitignored) and `config/key-dev-public.pem`
+  (committed, baked into the binary at build time).
+
+## Project layout
+
+```
+src/                  Vala daemon source (11 modules + VAPI bindings)
+test/                 Host-side unit tests + integration test plan
+config/               Build configs (uncrustify, vala-lint, cross-file, dev keys)
+openspec/specs/       Main specifications (9 specs)
+openspec/changes/     OpenSpec changes (inject archived, ci/ota planned)
+subprojects/          Pinned frida git wraps (fetched by make init)
+.tools/               Built tools (frida-patched valac, vala-lint; gitignored)
+```
 
 ## Toolchain
 
 Required tools (all installed or built by `make init`):
 
-- Vala compiler (`valac`)
-- meson (>= 0.60.0)
+- Vala compiler (`valac`) — the frida-patched build (version suffix `-frida`)
+- meson (>= 1.1.0, frida-core's floor)
 - ninja
-- git (fetches the pinned frida wraps; clones vala-lint)
-- openssl (ed25519 dev keypair)
-- bsdiff (OTA binary diffs)
-- uncrustify (Vala formatter / `make lint` check)
+- git (fetches pinned frida wraps; clones vala-lint)
+- openssl (ed25519 dev keypair generation)
+- bsdiff (OTA binary diffs, used by the `ota` change)
+- uncrustify (Vala formatter / `make lint-fix`)
 - io.elementary.vala-lint (Vala linter; built from source, no OS package)
-- Android cross toolchain / NDK for the target device
+- Android NDK for device cross-compilation
 
 Verify everything is present:
 
@@ -48,20 +62,19 @@ Verify everything is present:
 make check
 ```
 
-It reports each missing tool by name — including both `uncrustify` and
-`io.elementary.vala-lint` — and exits non-zero if any is missing.
-
 ## Installing per OS
 
-`make init` automates all installation: OS-package tools and the vala-lint source build.
+`make init` automates all installation: OS packages, vala-lint source build,
+and frida-patched valac build.
 
 **macOS** (Homebrew): `make init` runs
 `brew install vala meson ninja bsdiff uncrustify json-glib glib pkg-config`,
-then builds vala-lint from source.
+then builds vala-lint and the frida-patched valac from source.
 
 **Linux** (Ubuntu/Debian): `make init` runs `apt-get` for the equivalent
 packages (incl. `libvala-dev`, `libgee-0.8-dev`, `libjson-glib-dev`), then
-builds vala-lint from source. The apt step uses `sudo`.
+builds vala-lint and the frida-patched valac from source. The apt step uses
+`sudo`.
 
 **Windows**: WSL2 + Ubuntu is recommended (the Android cross toolchain is
 Linux-native). Install once in PowerShell (Admin):
@@ -76,7 +89,7 @@ Then follow the Linux path inside WSL2.
 
 Frida is provisioned from pinned git wraps in `subprojects/` (frida, frida-core,
 frida-gum, all pinned to tag `17.11.0`). They are fetched and cached on
-`make setup`; there is no hardcoded local source path.
+`make init`; there is no hardcoded local source path.
 
 ## Lint, fix, test
 
@@ -97,20 +110,22 @@ Builds are release-only (no debug configuration):
 make build
 ```
 
-The daemon build targets, the frida-core linkage, and the project version are
-added by the `inject` change; until then `make setup` only provisions the
-environment.
+The daemon links frida-core statically with LTO. Strip is applied at install
+time (`meson install --strip`), not by `make build`, so the host build keeps
+its symbol table for tests; the host build links dynamically against host
+libs, while the Android device build is fully static (`-static`).
 
 ## Signing and verification
 
 The private signing key is never committed. Production signing uses a key held
 only in CI secrets; locally you use the dev keypair from `make key-dev`. The
-public key is baked into the binary. Signature and hash verification is always
+public key (`config/key-dev-public.pem`) is baked into the binary at build time
+via a meson `custom_target`. Signature and hash verification is always
 enabled — there is no mode that disables it.
 
 ## Android cross-compilation
 
-The daemon runs on an Android device (arm64-v8a). A meson cross-file is
+The daemon runs on an Android device (arm64-v8a). A meson cross file is
 provided at `config/android-cross.ini`, targeting `aarch64-linux-android`
 via the Android NDK.
 

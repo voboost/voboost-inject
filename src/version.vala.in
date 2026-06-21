@@ -1,0 +1,7 @@
+// Generated from src/version.vala.in by meson configure_file. The daemon
+// version is the project() version in meson.build (the single source of truth;
+// ci-versioning requires the version is defined nowhere else). Do not edit the
+// generated file; edit meson.build's project() version instead.
+namespace Voboost {
+    public const string DAEMON_VERSION = "@VERSION@";
+}

@@ -10,7 +10,7 @@
 ## OpenSpec
 - Spec-driven; truth is openspec, no code without an applied change, invariants live in specs
 - propose -> apply -> archive
-- npx @fission-aiopenspec validate <change> --strict
+- npx @fission-ai/openspec validate <change> --strict
 
 ## Development
 - Lines <= 100 chars
