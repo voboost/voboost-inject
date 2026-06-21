@@ -35,6 +35,7 @@ public Safety safety { get; construct; }
 public ProcessWatcher watcher { get; construct; }
 public AppZoneWatcher app_watcher { get; construct; }
 public Status status { get; construct; }
+public Ota ota { get; construct; }
 
 // plan is accessed via an immutable snapshot reference. Reload swaps the
 // reference atomically so that in-flight injections reading the old
@@ -44,6 +45,10 @@ private Plan? plan = null;
 // True while an injection cycle is in progress; deferred reload waits.
 private bool inject_in_progress = false;
 private bool reload_pending = false;
+// Set when a core apply requested the self-shutdown (init restart). run() checks
+// it after the boot early-apply so it does not start an injection cycle that the
+// pending SIGTERM teardown would immediately discard.
+private bool core_self_shutdown_requested = false;
 // GLib source id of the boot poll (0 = not running); see maybe_watch_boot.
 private uint boot_timer = 0;
 // Cached process→agents map rebuilt on each plan reload so that
@@ -55,16 +60,28 @@ private HashTable<string, GenericArray<AgentDef> >? proc_map = null;
 public Supervisor(string root_zone, string app_zone, TrustStore trust,
                   Manifest manifest, FridaController frida,
                   Safety safety, ProcessWatcher watcher,
-                  AppZoneWatcher app_watcher, Status status) {
+                  AppZoneWatcher app_watcher, Status status, Ota ota) {
     Object(root_zone: root_zone, app_zone: app_zone, trust: trust,
            manifest: manifest, frida: frida, safety: safety,
            watcher: watcher, app_watcher: app_watcher,
-           status: status);
+           status: status, ota: ota);
 }
 
 public async void run() {
     this.state = DaemonState.VERIFY_SELF;
+    // OTA boot recovery: restore manifest.json.prev if the active manifest is
+    // absent or fails signature verification (atomic-apply-rollback).
+    this.ota.recover_manifest();
     if (!yield verify_self()) {
+        // OTA: a DEGRADED restart with a pending core switch rolls back to the
+        // previous binary instead of staying degraded (atomic-apply-rollback).
+        if (this.ota.core_switch_pending()) {
+            this.ota.rollback_core_switch();
+            Log.err("supervisor",
+                    "DEGRADED after core switch; rolling back and exiting");
+            Posix.kill(Posix.getpid(), Posix.Signal.TERM);
+            return;
+        }
         this.state = DaemonState.DEGRADED;
         this.status.daemon_state = "degraded";
         this.status.kill_switch = false;
@@ -76,6 +93,11 @@ public async void run() {
     this.state = DaemonState.READY;
     this.status.daemon_state = "ready";
     this.status.manifest_version = this.manifest.manifest_version;
+    // OTA: a READY restart confirms a pending core switch (clear marker, GC the
+    // previous binary) — atomic-apply-rollback "Ready restart confirms".
+    if (this.ota.core_switch_pending()) {
+        this.ota.confirm_core_switch();
+    }
     Log.ok("supervisor", "READY");
 
     load_plan();
@@ -109,6 +131,15 @@ public async void run() {
         this.app_watcher.start();
     } catch (Error e) {
         Log.err("supervisor", "watcher start: " + e.message);
+    }
+
+    // OTA: apply a staged agent update before the first injection so the first
+    // set is current (atomic-apply-rollback "before the first injection").
+    yield apply_staged_update(false);
+    // A staged core apply requested a self-shutdown (init restart): do not
+    // begin an injection cycle that the pending SIGTERM teardown discards.
+    if (this.core_self_shutdown_requested) {
+        return;
     }
 
     yield inject_running_targets();
@@ -192,12 +223,11 @@ private void wire_events() {
                 load_plan();
                 apply_plan_diff.begin();
             });
-    // Staging swap mechanics belong to the ota change; in this change
-    // the marker is only observed and logged (staged content stays
-    // untrusted — app-interface "Staging read boundary").
+    // OTA: a complete staged update (agents and/or core) is re-verified with the
+    // embedded key and applied here. Staged content stays untrusted until the
+    // Ota module re-verifies it (app-interface "Staging read boundary").
     this.app_watcher.update_ready.connect(() => {
-                Log.info("supervisor",
-                         "staging update-ready observed(handled by ota)");
+                apply_staged_update.begin(true);
             });
 }
 
@@ -715,6 +745,119 @@ private void write_status_safe() {
     } catch (Error e) {
         Log.err("supervisor", "status write: " + e.message);
     }
+}
+
+// OTA: consume a complete staged update from the app-zone staging/ dir. Agent
+// plane: re-verify the staged daemon manifest + agent sha256s, swap the manifest
+// (immediate), reload, and (when reinject) re-inject. Core plane: re-verify the
+// staged release manifest, install the binary content-addressed, repoint the
+// launch path, and self-shut down so init restarts the new binary. reinject is
+// false on the boot early-apply path (inject_running_targets follows) and true
+// on the runtime update_ready path. See ota specs.
+private async void apply_staged_update(bool reinject) {
+    string staging = Path.build_filename(this.app_zone, "staging");
+    // Gate on the update-ready marker (the producer's "complete set ready"
+    // signal) and consume it after any attempt, so a successful update is not
+    // re-applied on every boot (core plane: that would crash-loop via
+    // self-shutdown + init restart). update-planes staging contract.
+    if (!this.ota.staged_update_ready(staging)) {
+        return;
+    }
+    // Core plane: a staged binary + signed release manifest. Handled separately
+    // because a successful apply ends in a self-shutdown (init restart) and
+    // consumes the marker itself before exiting.
+    string staged_core = Path.build_filename(staging, "voboost-inject");
+    string staged_rm = Path.build_filename(staging, "release-manifest.json");
+    string staged_rm_sig = Path.build_filename(
+        staging, "release-manifest.json.sig");
+    if (FileUtils.test(staged_core, FileTest.EXISTS)
+        && FileUtils.test(staged_rm, FileTest.EXISTS)
+        && FileUtils.test(staged_rm_sig, FileTest.EXISTS)) {
+        yield apply_staged_core(staging, staged_core, staged_rm, staged_rm_sig);
+        return;
+    }
+    // Agent plane: a staged signed daemon manifest.
+    string staged_manifest = Path.build_filename(staging, "manifest.json");
+    bool applied = FileUtils.test(staged_manifest, FileTest.EXISTS)
+                   && do_agent_apply(staging);
+    // Consume the marker whether or not the apply succeeded: a present marker
+    // implies a complete set (producer contract), so a verified failure is a
+    // genuinely bad set the app must re-stage to retry — not something to loop
+    // on. On success this prevents the boot-time re-apply.
+    this.ota.consume_update_ready(staging);
+    if (applied && reinject) {
+        yield apply_plan_diff();
+    }
+}
+
+private async void apply_staged_core(
+    string staging, string staged_core, string staged_rm,
+    string staged_rm_sig) {
+    // DoS guard: reject an oversized staged release manifest before reading it
+    // into memory (mirrors apply_core_update's size pre-check).
+    Posix.Stat st;
+    if (Posix.stat(staged_rm, out st) != 0
+        || st.st_size > Ota.MAX_RELEASE_MANIFEST_BYTES) {
+        Log.err("supervisor", "staged release-manifest oversize/absent");
+        this.ota.consume_update_ready(staging);
+        return;
+    }
+    uint8[] rm_bytes;
+    uint8[] rm_sig;
+    try {
+        FileUtils.get_data(staged_rm, out rm_bytes);
+        FileUtils.get_data(staged_rm_sig, out rm_sig);
+    } catch (Error e) {
+        Log.err("supervisor", "staged release-manifest read: " + e.message);
+        this.ota.consume_update_ready(staging);
+        return;
+    }
+    var rm = this.ota.verify_release_manifest(rm_bytes, rm_sig);
+    if (rm == null) {
+        Log.err("supervisor", "staged release-manifest rejected");
+        this.ota.consume_update_ready(staging);
+        return;
+    }
+    var res = this.ota.apply_core_update(staged_core, rm);
+    // Consume the marker before the self-shutdown so the post-restart boot does
+    // not re-apply the same core (crash-loop). On rejection the bad set is dropped.
+    this.ota.consume_update_ready(staging);
+    if (res == CoreApplyOutcome.APPLIED) {
+        Log.ok("supervisor", "core applied; self-shutdown for init restart");
+        this.core_self_shutdown_requested = true;
+        write_status_safe();
+        // Raise SIGTERM: the installed handler performs the clean teardown
+        // (detach sessions, resume pending spawns, release the pidfile lock) and
+        // quits the loop, so the process exits and init restarts the new binary
+        // (system-ota-survival "Init hook restarts the daemon on exit").
+        Posix.kill(Posix.getpid(), Posix.Signal.TERM);
+    }
+}
+
+// Re-verify and swap the staged daemon manifest, then reload the in-memory
+// manifest + plan. Returns false (active set unchanged) if the staged update is
+// absent or fails re-verification.
+private bool do_agent_apply(string staging) {
+    if (!this.ota.apply_agent_update(staging)) {
+        return false;
+    }
+    reload_verified_manifest();
+    load_plan();
+    return true;
+}
+
+private bool reload_verified_manifest() {
+    string mpath = Path.build_filename(this.root_zone, "manifest.json");
+    string spath = Path.build_filename(this.root_zone, "manifest.sig");
+    uint8[] j;
+    uint8[] s;
+    try {
+        FileUtils.get_data(mpath, out j);
+        FileUtils.get_data(spath, out s);
+    } catch (Error e) {
+        return false;
+    }
+    return this.manifest.load_verified(j, s, this.trust);
 }
 
 public async void shutdown() {

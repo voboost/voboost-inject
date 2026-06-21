@@ -8,5 +8,15 @@ src/embedded_pubkey.vala
 test/fixtures/manifest.json
 test/fixtures/manifest.sig
 test/fixtures/manifest-bad.sig
+test/fixtures/manifest-multi.json
+test/fixtures/manifest-multi.sig
 test/fixtures/agents/
+test/fixtures/release-manifest.json
+test/fixtures/release-manifest.json.sig
+test/fixtures/release-manifest-bad.sig
+test/fixtures/release-manifest-bad-entry.json
+test/fixtures/release-manifest-bad-entry.json.sig
+test/fixtures/release-manifest-bad-channel.json
+test/fixtures/release-manifest-bad-channel.json.sig
+test/fixtures/voboost-inject
 subprojects/.wraplock

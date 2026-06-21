@@ -20,6 +20,7 @@ inject_test_srcs = files(
   meson.project_source_root() / 'src/plan_reader.vala',
   meson.project_source_root() / 'src/status.vala',
   meson.project_source_root() / 'src/safety.vala',
+  meson.project_source_root() / 'src/ota.vala',
 )
 inject_test_vala_args = ['--pkg=posix']
 # Inline custom_target — no scripts/ file needed.
@@ -54,7 +55,7 @@ inject_fixtures = custom_target(
   ],
 )
 
-foreach t : ['manifest', 'plan', 'safety', 'status', 'trust_store', 'log']
+foreach t : ['manifest', 'plan', 'safety', 'status', 'trust_store', 'log', 'ota']
   exe = executable(
     t + '_test',
     [t + '_test.vala'] + inject_test_srcs + [inject_pubkey],

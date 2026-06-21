@@ -87,6 +87,7 @@ inject_sources = files(
   'process_watcher.vala',
   'frida_controller.vala',
   'supervisor.vala',
+  'ota.vala',
   'main.vala',
 )
 

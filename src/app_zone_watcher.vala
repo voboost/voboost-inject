@@ -20,9 +20,6 @@ public AppZoneWatcher(string app_zone, uint debounce_ms = 500) {
 }
 
 public void start() throws Error {
-    string staging_path = Path.build_filename(
-        this.app_zone, "staging");
-
     // Watch the app-zone DIRECTORY for inject.json, not the file. The
     // inotify backend (Android/Linux) tracks inodes, so a file monitor on
     // a not-yet-existing inject.json can miss its creation — the init hook
@@ -44,35 +41,55 @@ public void start() throws Error {
                 if (name == "inject.json" || oname == "inject.json") {
                     schedule_plan();
                 }
+                // The app creates `staging/` on demand for an OTA, which is
+                // usually AFTER the boot-started daemon began watching. Re-
+                // establish the staging monitor when staging/ appears so a
+                // runtime OTA is observed immediately, not only on the next
+                // daemon restart (update-planes "applies immediately").
+                if (name == "staging" || oname == "staging") {
+                    ensure_staging_monitor();
+                }
             });
 
-    // Staging watch: best-effort. The app creates `staging/` on demand for
-    // an OTA (the swap mechanics belong to the ota change); until it exists
-    // there is nothing to monitor, and that is not an error. Wrap it so a
-    // missing staging/ never prevents the (required) plan watch above from
-    // being established — start () only throws for an absent app zone (the
-    // app is not installed), which the supervisor fails safe on.
-    var staging = File.new_for_path(staging_path);
-    try {
-        this.staging_mon = staging.monitor_directory(
-            FileMonitorFlags.NONE, null);
-        // Same shape as the plan filter above (rename vs create). Both args
-        // are nullable in the GFileMonitor contract; guard `file` so a
-        // rename-only event (file == null, other == the marker) does not
-        // null-deref.
-        this.staging_mon.changed.connect((file, other, ev) => {
-                    string? name = file != null ? file.get_basename() : null;
-                    string? oname =
-                        other != null ? other.get_basename() : null;
-                    if (name == "update-ready" || oname == "update-ready") {
-                        schedule_staging();
-                    }
-                });
-    } catch (Error staging_err) {
-        Log.info("watcher",
-                 "staging/ not present yet; OTA marker watch deferred");
-    }
+    // Establish the staging monitor now if staging/ already exists at start.
+    ensure_staging_monitor();
     Log.info("watcher", "watching " + this.app_zone);
+}
+
+// Create the staging/ directory monitor if staging/ exists and is not yet
+// watched, and catch a marker that already exists (created before the monitor
+// was set, so no creation event will fire). Idempotent. Best-effort: a missing
+// staging/ is not an error (the app creates it on demand); it is retried from
+// the plan watch when staging/ appears, and start() only throws for an absent
+// app zone (the app is not installed), which the supervisor fails safe on.
+private void ensure_staging_monitor() {
+    if (this.staging_mon != null) {
+        return;
+    }
+    string staging_path = Path.build_filename(this.app_zone, "staging");
+    try {
+        this.staging_mon = File.new_for_path(staging_path).monitor_directory(
+            FileMonitorFlags.NONE, null);
+    } catch (Error e) {
+        return;  // staging/ still absent; retried when plan_mon sees it appear
+    }
+    // Same shape as the plan filter above (rename vs create). Both args are
+    // nullable in the GFileMonitor contract; guard `file` so a rename-only
+    // event (file == null, other == the marker) does not null-deref.
+    this.staging_mon.changed.connect((file, other, ev) => {
+                string? name = file != null ? file.get_basename() : null;
+                string? oname = other != null ? other.get_basename() : null;
+                if (name == "update-ready" || oname == "update-ready") {
+                    schedule_staging();
+                }
+            });
+    // If the marker predates the monitor (staging/ written + marked before the
+    // monitor existed), no creation event fires — check once. schedule_staging
+    // debounces, so a racing event is harmless.
+    if (FileUtils.test(
+            Path.build_filename(staging_path, "update-ready"), FileTest.EXISTS)) {
+        schedule_staging();
+    }
 }
 
 private void schedule_plan() {
