@@ -1,0 +1,52 @@
+name: ci
+
+on: [push, pull_request]
+
+# Least privilege: checkout-only workflow.
+permissions:
+  contents: read
+
+# Cancel a run superseded by a newer push to the same ref so consecutive
+# pushes don't queue up. Deliberately NOT applied to the release workflow —
+# never cancel a release mid-publish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache the whole `make init` result: the project-local tools prefix
+      # (.tools/, holding the source-built vala-lint and the frida-patched
+      # valac) and the fetched frida checkout (subprojects/). Keyed on the
+      # pinned frida revisions (wrap files) and the vala-lint pin (Makefile,
+      # VALA_LINT_REV); changing either pin invalidates the cache.
+      - name: Cache make init result
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools
+            subprojects
+          key: init-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'Makefile') }}
+
+      # Provision exactly like a developer. `make init` installs the OS
+      # packages, builds vala-lint and the frida-patched valac, fetches the
+      # frida wraps, generates the dev keypair, and runs meson setup. The
+      # Makefile prepends .tools/bin to PATH for its own recipes.
+      - name: Provision (make init)
+        run: make init
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      # Release-only host build for validation (release, LTO; dynamically
+      # linked, unstripped). The fully-static device (arm64) build runs only
+      # in the release workflow.
+      - name: Build (release-only, host)
+        run: make build

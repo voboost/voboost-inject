@@ -33,6 +33,9 @@ init:
 		echo "init: unsupported OS '$$os'. Use WSL2 + Ubuntu." >&2; \
 		exit 1; \
 	fi; \
+	if command -v io.elementary.vala-lint >/dev/null 2>&1; then \
+		echo "init: io.elementary.vala-lint already present; skipping its build"; \
+	else \
 	echo "init: building io.elementary.vala-lint @ $(VALA_LINT_REV)"; \
 	src=$$(mktemp -d); \
 	git clone --depth 1 --branch "$(VALA_LINT_REV)" "$(VALA_LINT_REPO)" "$$src"; \
@@ -50,7 +53,8 @@ init:
 	VALAC="$$lint_valac" ninja -C "$$src/build"; \
 	ninja -C "$$src/build" install; \
 	rm -rf "$$src"; \
-	echo "init: vala-lint installed (PATH gets $(TOOLS_DIR)/bin from this Makefile)."
+	echo "init: vala-lint installed (PATH gets $(TOOLS_DIR)/bin from this Makefile)."; \
+	fi
 	meson subprojects download
 	@if valac --version 2>/dev/null | grep -q -- '-frida'; then \
 		echo "init: frida-patched valac already present; skipping its build"; \
@@ -136,3 +140,19 @@ ANDROID_BUILD_DIR ?= build-android
 build-android:
 	meson setup $(ANDROID_BUILD_DIR) --cross-file config/android-cross.ini
 	ninja -C $(ANDROID_BUILD_DIR)
+
+.PHONY: sign verify-sig
+
+# Release-time ed25519 detached signing/verification (called by release.yml).
+# KEY=<pem> and FILE=<path-to-manifest> are passed by the caller.
+sign:
+	@test -n "$(KEY)"  || { echo "sign: KEY=<private.pem> required"  >&2; exit 2; }
+	@test -n "$(FILE)" || { echo "sign: FILE=<manifest> required"    >&2; exit 2; }
+	openssl pkeyutl -sign -inkey "$(KEY)" -rawin -in "$(FILE)" -out "$(FILE).sig"
+	@echo "Signed $(FILE) -> $(FILE).sig"
+
+verify-sig:
+	@test -n "$(KEY)"  || { echo "verify-sig: KEY=<public.pem> required" >&2; exit 2; }
+	@test -n "$(FILE)" || { echo "verify-sig: FILE=<manifest> required"  >&2; exit 2; }
+	openssl pkeyutl -verify -pubin -inkey "$(KEY)" -rawin -in "$(FILE)" -sigfile "$(FILE).sig"
+	@echo "Verified $(FILE).sig against $(KEY)"

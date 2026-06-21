@@ -2,7 +2,8 @@
 plans
 build/
 .tools/
-config/key-dev-private.pem
+dist/
+config/*-private.pem
 src/embedded_pubkey.vala
 test/fixtures/manifest.json
 test/fixtures/manifest.sig
