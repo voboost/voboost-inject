@@ -53,6 +53,15 @@ init:
 	VALAC="$$lint_valac" ninja -C "$$src/build"; \
 	ninja -C "$$src/build" install; \
 	rm -rf "$$src"; \
+	if [ "$$os" = "Darwin" ]; then \
+		vlintlib=$$(basename "$(TOOLS_DIR)/lib"/libvala-linter-*.dylib 2>/dev/null || true); \
+		if [ -n "$$vlintlib" ]; then \
+			install_name_tool -id @rpath/$$vlintlib "$(TOOLS_DIR)/lib/$$vlintlib"; \
+			install_name_tool -change "$(TOOLS_DIR)/lib/$$vlintlib" @rpath/$$vlintlib "$(TOOLS_DIR)/bin/io.elementary.vala-lint"; \
+			install_name_tool -add_rpath @loader_path/../lib "$(TOOLS_DIR)/bin/io.elementary.vala-lint" 2>/dev/null || true; \
+			echo "init: vala-lint install names relativized (relocatable)"; \
+		fi; \
+	fi; \
 	echo "init: vala-lint installed (PATH gets $(TOOLS_DIR)/bin from this Makefile)."; \
 	fi
 	meson subprojects download
