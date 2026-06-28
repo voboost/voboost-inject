@@ -434,19 +434,28 @@ private async bool load_js(
     Frida.Session session, AgentDef agent, string config,
     string stage) {
     string path = Path.build_filename(this.root_zone, agent.file);
-    string source;
+    // Read as raw bytes (no trailing NUL). FileUtils.get_contents returns a
+    // string whose .data includes the terminating NUL, so hashing source.data
+    // would include the NUL and diverge from the manifest sha256 (computed by
+    // gen-fixtures.sh via openssl and by trust_store.sha256_file via
+    // FileUtils.get_data, neither of which includes a NUL). get_data matches
+    // sha256_file exactly.
+    uint8[] data;
     try {
-        FileUtils.get_contents(path, out source);
+        FileUtils.get_data(path, out data);
     } catch (Error e) {
         Log.err("frida", "agent read %s: %s".printf(
                     agent.id, e.message));
         return false;
     }
-    if (Checksum.compute_for_data(ChecksumType.SHA256, source.data)
+    if (Checksum.compute_for_data(ChecksumType.SHA256, data)
         != agent.sha256.down()) {
         Log.err("frida", "sha256 mismatch at load: " + agent.id);
         return false;
     }
+    // create_script_bounded takes the source as a string; the NUL-terminated
+    // copy it builds from these bytes is identical to the on-disk file.
+    string source = (string) data;
 
     var script = yield create_script_bounded(session, source, agent.id);
     if (script == null) {

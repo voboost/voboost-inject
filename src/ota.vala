@@ -218,10 +218,27 @@ public bool recover_manifest() {
     if (!manifest_verifies(prev, prev_sig)) {
         return false;
     }
-    // Restore: rename .prev over the active (atomic on one filesystem). If the
-    // active is absent this creates it; if present-but-bad it is replaced.
-    FileUtils.rename(prev, active);
-    FileUtils.rename(prev_sig, active_sig);
+    // Restore: rename .prev over the active (atomic on one filesystem). If
+    // the active is absent this creates it; if present-but-bad it is replaced.
+    // Both renames must succeed: if the manifest lands but its signature does
+    // not, the active pair is left half-updated (manifest.json fresh,
+    // manifest.sig stale) and the .prev backup is destroyed. Roll the first
+    // rename back if the second fails so .prev survives for the next attempt.
+    if (FileUtils.rename(prev, active) != 0) {
+        Log.err("ota", "restore manifest.json rename failed");
+        return false;
+    }
+    if (FileUtils.rename(prev_sig, active_sig) != 0) {
+        Log.err("ota", "restore manifest.sig rename failed; rolling back");
+        // Best-effort restore: move manifest.json back to .prev so the
+        // verified .prev pair is preserved for the next recovery attempt.
+        // A failure here leaves the active manifest without a .prev backup
+        // (already an unrecoverable state); log and proceed.
+        if (FileUtils.rename(active, prev) != 0) {
+            Log.err("ota", "manifest.json rollback failed; .prev lost");
+        }
+        return false;
+    }
     Log.ok("ota", "restored manifest from .prev");
     return true;
 }
