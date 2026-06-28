@@ -1,0 +1,20 @@
+diff --git a/mesonbuild/compilers/cpp.py b/mesonbuild/compilers/cpp.py
+index 540dedb18..f23c61aca 100644
+--- a/mesonbuild/compilers/cpp.py
++++ b/mesonbuild/compilers/cpp.py
+@@ -314,10 +314,12 @@ class ClangCPPCompiler(_StdCPPLibMixin, ClangCompiler, CPPCompiler):
+ 
+         # Clang supports both libstdc++ and libc++
+         args.append('-D_GLIBCXX_ASSERTIONS=1')
+-        if version_compare(self.version, '>=18'):
++        if version_compare(self.version, '>=15'):
++            # _LIBCPP_ENABLE_ASSERTIONS was removed in libc++ (LLVM 18+ / the
++            # macOS 26.2 SDK); _LIBCPP_HARDENING_MODE is the replacement and is
++            # supported since LLVM 15. Use it unconditionally for >=15 so the
++            # build-machine (host) C++ compiles on recent macOS SDKs.
+             args.append('-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE')
+-        elif version_compare(self.version, '>=15'):
+-            args.append('-D_LIBCPP_ENABLE_ASSERTIONS=1')
+ 
+         return args
+ 

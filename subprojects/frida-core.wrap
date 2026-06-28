@@ -3,6 +3,12 @@ url = https://github.com/frida/frida-core.git
 revision = 17.11.0
 directory = frida-core
 depth = 1
+# voboost-inject patch: frida-core's libc-shim.c gates FRIDA_STDIO_OPAQUE_FILE
+# on HAVE_MUSL only, but bionic (Android) also has an opaque/incomplete FILE
+# type (struct __sFILE is a forward declaration in the NDK's stdio.h), so
+# sizeof(FILE) in frida_file_wrap/frida_file_set_handle fails to compile for
+# the Android cross-build. The patch also defines it for HAVE_ANDROID.
+diff_files = frida-core-libc-shim-opaque-file-bionic.patch
 
 [provide]
 dependency_names = frida-core-1.0

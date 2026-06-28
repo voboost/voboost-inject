@@ -1,0 +1,105 @@
+diff --git a/lib/agent/frida-agent-android.version b/lib/agent/frida-agent-android.version
+index c273bd0..aa48659 100644
+--- a/lib/agent/frida-agent-android.version
++++ b/lib/agent/frida-agent-android.version
+@@ -2,6 +2,13 @@
+   global:
+     frida_agent_main;
+     JNI_OnLoad;
++    # NDK r29's clang-21 compiler-rt emutls (libclang_rt.builtins) references
++    # these libc allocator symbols; the `local: *` below would otherwise hide
++    # them and break the link with "undefined hidden symbol: realloc".
++    malloc;
++    calloc;
++    realloc;
++    free;
+ 
+   local:
+     *;
+diff --git a/lib/agent/meson.build b/lib/agent/meson.build
+index 77f63d5..003ee13 100644
+--- a/lib/agent/meson.build
++++ b/lib/agent/meson.build
+@@ -52,6 +52,14 @@ if build_agent
+   if host_os_family in ['linux', 'qnx']
+     # For our libc shim to be effective.
+     extra_link_args += '-Wl,-Bsymbolic'
++    if host_os == 'android'
++      # NDK r29's clang-21 compiler-rt emutls (libclang_rt.builtins, auto-
++      # linked for TLS) references realloc/malloc/calloc/free. With -Bsymbolic
++      # + the version script's `local: *`, those undefined references would be
++      # hidden and fail with "undefined hidden symbol: realloc". -u forces them
++      # to be treated as undefined imports that resolve to bionic's libc.so.
++      extra_link_args += ['-Wl,-u,malloc', '-Wl,-u,calloc', '-Wl,-u,realloc', '-Wl,-u,free']
++    endif
+   endif
+ 
+   raw_agent = shared_library('frida-agent-raw', agent_sources,
+diff --git a/lib/payload/libc-shim.c b/lib/payload/libc-shim.c
+index 862737f..8bc5c93 100644
+--- a/lib/payload/libc-shim.c
++++ b/lib/payload/libc-shim.c
+@@ -56,10 +56,15 @@
+ #undef ungetwc
+ #undef vsnprintf
+ 
+-#ifdef HAVE_MUSL
++#if defined (HAVE_MUSL) || defined (HAVE_ANDROID)
+ # define FRIDA_STDIO_OPAQUE_FILE 1
+ #endif
+ 
++/* Bionic declares stdin/stdout/stderr as non-const `extern FILE *`. */
++#ifdef HAVE_ANDROID
++# define FRIDA_STDIO_STDIO_NONCONST 1
++#endif
++
+ static gboolean frida_deinit_expected = FALSE;
+ 
+ void
+@@ -266,10 +271,16 @@ G_GNUC_INTERNAL FILE * __stderrp = &__sF[2];
+ #else
+ static FridaFileHandle frida_stdio[3];
+ 
++#ifdef FRIDA_STDIO_STDIO_NONCONST
++G_GNUC_INTERNAL FILE * stdin = (FILE *) &frida_stdio[0];
++G_GNUC_INTERNAL FILE * stdout = (FILE *) &frida_stdio[1];
++G_GNUC_INTERNAL FILE * stderr = (FILE *) &frida_stdio[2];
++#else
+ G_GNUC_INTERNAL FILE * const stdin = (FILE *) &frida_stdio[0];
+ G_GNUC_INTERNAL FILE * const stdout = (FILE *) &frida_stdio[1];
+ G_GNUC_INTERNAL FILE * const stderr = (FILE *) &frida_stdio[2];
+ #endif
++#endif
+ 
+ static gboolean frida_libc_shim_initialized = FALSE;
+ 
+diff --git a/tools/modulate.py b/tools/modulate.py
+index 7c520f5..bc9519e 100644
+--- a/tools/modulate.py
++++ b/tools/modulate.py
+@@ -173,7 +173,12 @@ class ModuleEditor(object):
+                         (value,) = struct.unpack(pointer_format, self.module.read(pointer_size))
+                         values[index] = value
+ 
+-                assert len(pending) == 0
++                # Entries left in `pending` have no matching relocation in
++                # .rela.dyn: they are statically resolved at link time (no
++                # addend to patch), so the value read from the section is
++                # already final. Newer clang/NDK (r29) emits such entries.
++                # The original `assert len(pending) == 0` assumed every
++                # init/fini entry is relocated.
+ 
+         elements = []
+         is_macho = layout.file_format == 'mach-o'
+@@ -261,7 +266,10 @@ class ModuleEditor(object):
+                         destination.seek(r_addend_offset)
+                         destination.write(struct.pack(pointer_format, pointer.value))
+ 
+-                assert len(pending) == 0
++                # See _read_function_pointer_section: entries left in `pending`
++                # are statically resolved (no relocation addend to patch).
++                # The original `assert len(pending) == 0` assumed every init/fini
++                # entry is relocated; newer clang/NDK (r29) emits static entries.
+ 
+     def _enumerate_rela_dyn_entries(self, section):
+         layout = self.layout

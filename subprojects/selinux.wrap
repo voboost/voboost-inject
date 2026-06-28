@@ -1,0 +1,21 @@
+# voboost-inject override of frida-core's selinux subproject.
+# Same source as subprojects/frida-core/subprojects/selinux.wrap (frida/selinux
+# @ b7c8cd70d821bb3fc69500e6273149299b80b923), but with a patch_directory that
+# fixes two build bugs in frida's selinux fork that break the Android cross-
+# build (host_os == 'android' builds libselinux unconditionally for the local
+# backend's SELinux label handling):
+#   1. libselinux/src/load_policy.c includes <sepol/sepol.h>, but libselinux
+#      is built with no libsepol dependency (and before libsepol is subdir'd),
+#      so the include is not found.
+#   2. The top meson.build subdirs libselinux before libsepol.
+# The patch reorders the subdirs and adds libsepol_dep to libselinux. A top-
+# level subprojects/<name>.wrap takes precedence over the one inside
+# frida-core/subprojects/ (meson searches the root subprojects/ first).
+[wrap-git]
+url = https://github.com/frida/selinux.git
+revision = b7c8cd70d821bb3fc69500e6273149299b80b923
+depth = 1
+patch_directory = selinux
+
+[provide]
+dependency_names = libselinux, libsepol

@@ -1,3 +1,5 @@
-# Fetched wrap sources (provisioned by meson setup, not committed)
+# Fetched wrap sources (provisioned by meson setup, not committed).
+# packagefiles/ IS committed: meson patch_directory sources (e.g. monocypher).
 */
 !packagefiles/
+!packagefiles/**

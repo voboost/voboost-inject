@@ -66,12 +66,14 @@ jobs:
       # SHA-pinned (not @v1): this third-party action runs in the workflow that
       # handles SIGNING_KEY, so its supply chain is pinned to an immutable
       # commit. First-party actions/*@v4 follow the project convention. ndk-version
-      # still pins the NDK itself to r27d.
+      # pins the NDK to r29 — frida-core 17.11.0's releng requires exactly r29
+      # (releng/env_android.py NDK_REQUIRED=29, used by the embedded-agent build);
+      # r27/r27d are rejected with NdkVersionError.
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         with:
-          ndk-version: r27d
+          ndk-version: r29
 
       # Expose the NDK to the cross-build: ANDROID_NDK_HOME/ROOT for tooling that
       # reads it, and the LLVM prebuilt bin on $GITHUB_PATH so the cross-compiler
