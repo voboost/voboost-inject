@@ -1,6 +1,6 @@
 namespace Voboost {
-// GFileMonitor on inject.json and staging/update-ready, with debounce.
-// Emits plan_changed / update_ready. The watched zone is untrusted input;
+// GFileMonitor on inject.json and staging/core-update-ready, with debounce.
+// Emits plan_changed / core_update_ready. The watched zone is untrusted input;
 // verification happens downstream. See app-interface#Untrusted plan input
 // and #Staging read boundary.
 public class AppZoneWatcher : Object {
@@ -8,7 +8,7 @@ public string app_zone { get; construct; }
 public uint debounce_ms { get; construct; }
 
 public signal void plan_changed();
-public signal void update_ready();
+public signal void core_update_ready();
 
 private FileMonitor? plan_mon;
 private FileMonitor? staging_mon;
@@ -79,7 +79,8 @@ private void ensure_staging_monitor() {
     this.staging_mon.changed.connect((file, other, ev) => {
                 string? name = file != null ? file.get_basename() : null;
                 string? oname = other != null ? other.get_basename() : null;
-                if (name == "update-ready" || oname == "update-ready") {
+                if (name == "core-update-ready"
+                    || oname == "core-update-ready") {
                     schedule_staging();
                 }
             });
@@ -87,7 +88,8 @@ private void ensure_staging_monitor() {
     // monitor existed), no creation event fires — check once. schedule_staging
     // debounces, so a racing event is harmless.
     if (FileUtils.test(
-            Path.build_filename(staging_path, "update-ready"), FileTest.EXISTS)) {
+            Path.build_filename(staging_path, "core-update-ready"),
+            FileTest.EXISTS)) {
         schedule_staging();
     }
 }
@@ -109,7 +111,7 @@ private void schedule_staging() {
     }
     this.staging_timer = Timeout.add(this.debounce_ms, () => {
                 this.staging_timer = 0;
-                update_ready();
+                core_update_ready();
                 return Source.REMOVE;
             });
 }

@@ -62,22 +62,7 @@ string fresh_root() {
 
 string fresh_staging() {
     string d = fresh_dir("stage");
-    DirUtils.create(Path.build_filename(d, "agents"), 0700);
     return d;
-}
-
-string? link_target(string path) {
-    try {
-        var info = File.new_for_path(path).query_info(
-            "standard::symlink-target",
-            FileQueryInfoFlags.NOFOLLOW_SYMLINKS);
-        if (!info.has_attribute("standard::symlink-target")) {
-            return null;
-        }
-        return info.get_symlink_target();
-    } catch (Error e) {
-        return null;
-    }
 }
 
 bool manifest_verifies_at(string root, TrustStore trust) {
@@ -95,6 +80,33 @@ ReleaseManifest load_release_manifest(Ota ota) {
     return rm;
 }
 
+// Stage a daemon APK + the core-update-ready marker into staging/.
+void stage_core_apk(string staging, string apk_name) {
+    copy_file(FIX + "/" + apk_name,
+              Path.build_filename(staging, "voboost-inject.apk"));
+    try {
+        FileUtils.set_contents(
+            Path.build_filename(staging, "core-update-ready"), "ready");
+    } catch (FileError e) {
+        assert_not_reached();
+    }
+}
+
+// Write a fake "old" running binary at the stable launch path.
+void write_old_binary(string root) {
+    try {
+        FileUtils.set_contents(
+            Path.build_filename(root, "voboost-inject"), "old-core-binary\n");
+    } catch (FileError e) {
+        assert_not_reached();
+    }
+}
+
+string file_sha(string path) {
+    uint8[] data = read_bytes_or_fail(path);
+    return Checksum.compute_for_data(ChecksumType.SHA256, data);
+}
+
 // --- release-manifest verify ----------------------------------------------
 
 void test_release_manifest_verify() {
@@ -103,7 +115,7 @@ void test_release_manifest_verify() {
     assert(rm.version == "1.0.0-beta1");
     assert(rm.channel == "core");
     assert(rm.files.length == 1);
-    assert(rm.files[0].path == "voboost-inject");
+    assert(rm.files[0].path == "voboost-inject.apk");
     assert(rm.files[0].channel == "core");
     assert(rm.files[0].size > 0);
 }
@@ -123,50 +135,219 @@ void test_release_manifest_tampered() {
     assert(ota.verify_release_manifest(rm, sig) == null);
 }
 
-// --- agent manifest-swap --------------------------------------------------
+void test_release_manifest_oversize_rejected() {
+    var ota = new Ota("/data/voboost", new TrustStore());
+    uint8[] sig = read_bytes_or_fail(FIX + "/release-manifest.json.sig");
+    uint8[] big = new uint8[Ota.MAX_RELEASE_MANIFEST_BYTES + 1];
+    assert(ota.verify_release_manifest(big, sig) == null);
+}
 
-void test_agent_apply_installs_into_root() {
+void test_release_manifest_bad_entry_rejected() {
+    var ota = new Ota("/data/voboost", new TrustStore());
+    uint8[] rm = read_bytes_or_fail(FIX + "/release-manifest-bad-entry.json");
+    uint8[] sig = read_bytes_or_fail(
+        FIX + "/release-manifest-bad-entry.json.sig");
+    assert(ota.verify_release_manifest(rm, sig) == null);
+}
+
+void test_release_manifest_bad_channel_rejected() {
+    var ota = new Ota("/data/voboost", new TrustStore());
+    uint8[] rm = read_bytes_or_fail(FIX + "/release-manifest-bad-channel.json");
+    uint8[] sig = read_bytes_or_fail(
+        FIX + "/release-manifest-bad-channel.json.sig");
+    assert(ota.verify_release_manifest(rm, sig) == null);
+}
+
+// --- APK embedded-manifest re-verify + extract ----------------------------
+
+// The ZIP reader extracts the named entry from the APK.
+void test_apk_extract_manifest() {
+    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject.apk");
+    uint8[] m;
+    assert(Ota.extract_apk_entry(apk, "assets/manifest.json", out m));
+    assert(m.length > 0);
+    uint8[] s;
+    assert(Ota.extract_apk_entry(apk, "assets/manifest.sig", out s));
+    assert(s.length == 64);
+}
+
+void test_apk_extract_binary() {
+    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject.apk");
+    uint8[] bin;
+    assert(Ota.extract_apk_entry(apk, "assets/voboost-inject", out bin));
+    assert(bin.length > 0);
+    // The extracted binary matches the fixture binary byte-for-byte.
+    uint8[] expected = read_bytes_or_fail(FIX + "/voboost-inject");
+    assert(bin.length == expected.length);
+    assert(Posix.memcmp(bin, expected, bin.length) == 0);
+}
+
+// A deflated APK (method 8) is inflated correctly.
+void test_apk_extract_binary_deflated() {
+    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject-deflated.apk");
+    uint8[] bin;
+    assert(Ota.extract_apk_entry(apk, "assets/voboost-inject", out bin));
+    uint8[] expected = read_bytes_or_fail(FIX + "/voboost-inject");
+    assert(bin.length == expected.length);
+    assert(Posix.memcmp(bin, expected, bin.length) == 0);
+}
+
+void test_apk_extract_missing_entry() {
+    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject.apk");
+    uint8[] bin;
+    assert(!Ota.extract_apk_entry(apk, "assets/no-such-entry", out bin));
+}
+
+// --- core APK apply / rollback --------------------------------------------
+
+// A successful self-replace: the running binary is renamed to .prev, the new
+// binary takes the stable pathname, the marker is set, and the marker in
+// staging/ is consumed (single-use).
+void test_core_apk_apply_success() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
-    copy_file(FIX + "/manifest.json",
-              Path.build_filename(staging, "manifest.json"));
-    copy_file(FIX + "/manifest.sig",
-              Path.build_filename(staging, "manifest.sig"));
-    copy_file(FIX + "/agents/wm-viewport.js",
-              Path.build_filename(staging, "agents/wm-viewport.js"));
-    assert(ota.apply_agent_update(staging));
+    write_old_binary(root);
+    string oldsha = file_sha(Path.build_filename(root, "voboost-inject"));
+    stage_core_apk(staging, "voboost-inject.apk");
+    assert(ota.apply_core_apk_update(staging)
+           == CoreApplyOutcome.APPLIED);
+    // The marker is consumed (single-use).
+    assert(!FileUtils.test(
+               Path.build_filename(staging, "core-update-ready"),
+               FileTest.EXISTS));
+    // The new binary is at the stable pathname; the old is at .prev.
+    assert(file_sha(Path.build_filename(root, "voboost-inject"))
+           != oldsha);
     assert(FileUtils.test(
-               Path.build_filename(root, "manifest.json"), FileTest.EXISTS));
-    assert(FileUtils.test(
-               Path.build_filename(root, "agents/wm-viewport.js"), FileTest.EXISTS));
-    assert(manifest_verifies_at(root, new TrustStore()));
+               Path.build_filename(root, "voboost-inject.prev"),
+               FileTest.EXISTS));
+    assert(file_sha(Path.build_filename(root, "voboost-inject.prev"))
+           == oldsha);
+    // The core-switch-pending marker is set.
+    assert(ota.core_switch_pending());
     rm_rf(root);
     rm_rf(staging);
 }
 
-void test_agent_apply_rejects_bad_sig_and_keeps_active() {
+// A deflated APK applies the same as a stored one.
+void test_core_apk_apply_deflated() {
     string root = fresh_root();
     string staging = fresh_staging();
-    var trust = new TrustStore();
-    var ota = new Ota(root, trust);
-    copy_file(FIX + "/manifest.json",
-              Path.build_filename(root, "manifest.json"));
-    copy_file(FIX + "/manifest.sig",
-              Path.build_filename(root, "manifest.sig"));
-    copy_file(FIX + "/manifest.json",
-              Path.build_filename(staging, "manifest.json"));
-    copy_file(FIX + "/manifest-bad.sig",
-              Path.build_filename(staging, "manifest.sig"));
-    copy_file(FIX + "/agents/wm-viewport.js",
-              Path.build_filename(staging, "agents/wm-viewport.js"));
-    assert(ota.apply_agent_update(staging) == false);
-    assert(manifest_verifies_at(root, trust));
-    assert(!FileUtils.test(
-               Path.build_filename(root, "manifest.json.prev"), FileTest.EXISTS));
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    stage_core_apk(staging, "voboost-inject-deflated.apk");
+    assert(ota.apply_core_apk_update(staging)
+           == CoreApplyOutcome.APPLIED);
+    assert(ota.core_switch_pending());
     rm_rf(root);
     rm_rf(staging);
 }
+
+// A bad embedded manifest signature is rejected; the current binary stays
+// active and the marker is consumed (the bad APK is dropped).
+void test_core_apk_apply_bad_embedded_sig() {
+    string root = fresh_root();
+    string staging = fresh_staging();
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    stage_core_apk(staging, "voboost-inject-bad-sig.apk");
+    assert(ota.apply_core_apk_update(staging)
+           == CoreApplyOutcome.REJECTED_BAD_MANIFEST);
+    assert(!ota.core_switch_pending());
+    assert(!FileUtils.test(
+               Path.build_filename(root, "voboost-inject.prev"),
+               FileTest.EXISTS));
+    // The marker is consumed even on rejection.
+    assert(!FileUtils.test(
+               Path.build_filename(staging, "core-update-ready"),
+               FileTest.EXISTS));
+    rm_rf(root);
+    rm_rf(staging);
+}
+
+// No staged APK -> REJECTED_NO_APK, marker consumed.
+void test_core_apk_apply_no_apk() {
+    string root = fresh_root();
+    string staging = fresh_staging();
+    var ota = new Ota(root, new TrustStore());
+    try {
+        FileUtils.set_contents(
+            Path.build_filename(staging, "core-update-ready"), "ready");
+    } catch (FileError e) {
+        assert_not_reached();
+    }
+    assert(ota.apply_core_apk_update(staging)
+           == CoreApplyOutcome.REJECTED_NO_APK);
+    assert(!FileUtils.test(
+               Path.build_filename(staging, "core-update-ready"),
+               FileTest.EXISTS));
+    rm_rf(root);
+    rm_rf(staging);
+}
+
+// Rollback on a DEGRADED restart: .prev is restored over the bad new binary,
+// the marker is cleared.
+void test_core_apk_rollback_restores_prev() {
+    string root = fresh_root();
+    string staging = fresh_staging();
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    string oldsha = file_sha(Path.build_filename(root, "voboost-inject"));
+    stage_core_apk(staging, "voboost-inject.apk");
+    ota.apply_core_apk_update(staging);
+    assert(ota.core_switch_pending());
+    assert(ota.rollback_core_switch());
+    assert(!ota.core_switch_pending());
+    // The stable pathname now holds the old binary again.
+    assert(file_sha(Path.build_filename(root, "voboost-inject")) == oldsha);
+    // .prev is consumed by the rollback rename.
+    assert(!FileUtils.test(
+               Path.build_filename(root, "voboost-inject.prev"),
+               FileTest.EXISTS));
+    rm_rf(root);
+    rm_rf(staging);
+}
+
+// Confirm on a READY restart: marker cleared, .prev removed.
+void test_core_apk_confirm_clears_marker_and_removes_prev() {
+    string root = fresh_root();
+    string staging = fresh_staging();
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    stage_core_apk(staging, "voboost-inject.apk");
+    ota.apply_core_apk_update(staging);
+    assert(ota.core_switch_pending());
+    ota.confirm_core_switch();
+    assert(!ota.core_switch_pending());
+    assert(!FileUtils.test(
+               Path.build_filename(root, "voboost-inject.prev"),
+               FileTest.EXISTS));
+    rm_rf(root);
+    rm_rf(staging);
+}
+
+// No .prev rollback target: rollback returns false (stay DEGRADED).
+void test_core_apk_rollback_no_prev_target() {
+    string root = fresh_root();
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    // Simulate a marker with no .prev (power-loss between the rename and the
+    // marker write, or a first-update edge).
+    try {
+        FileUtils.set_contents(
+            Path.build_filename(root, "run/core-switch-pending"), "pending");
+    } catch (FileError e) {
+        assert_not_reached();
+    }
+    assert(ota.core_switch_pending());
+    assert(!ota.rollback_core_switch());
+    // The marker is cleared even when there is no .prev (no crash-loop).
+    assert(!ota.core_switch_pending());
+    rm_rf(root);
+}
+
+// --- boot recovery (daemon manifest) --------------------------------------
 
 void test_boot_recovery_restores_prev() {
     string root = fresh_root();
@@ -180,7 +361,8 @@ void test_boot_recovery_restores_prev() {
     assert(FileUtils.test(
                Path.build_filename(root, "manifest.json"), FileTest.EXISTS));
     assert(!FileUtils.test(
-               Path.build_filename(root, "manifest.json.prev"), FileTest.EXISTS));
+               Path.build_filename(root, "manifest.json.prev"),
+               FileTest.EXISTS));
     assert(manifest_verifies_at(root, trust));
     rm_rf(root);
 }
@@ -196,189 +378,17 @@ void test_boot_recovery_noop_when_active_ok() {
     rm_rf(root);
 }
 
-// --- core apply / rollback ------------------------------------------------
-
-string write_old_binary(string root) {
-    string stable = Path.build_filename(root, "voboost-inject");
-    try {
-        FileUtils.set_contents(stable, "old-core-binary\n");
-    } catch (FileError e) {
-        assert_not_reached();
-    }
-    return Checksum.compute_for_data(
-        ChecksumType.SHA256, "old-core-binary\n".data);
-}
-
-void test_core_apply_success() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var ota = new Ota(root, new TrustStore());
-    string oldsha = write_old_binary(root);
-    copy_file(FIX + "/voboost-inject",
-              Path.build_filename(staging, "voboost-inject"));
-    var rm = load_release_manifest(ota);
-    string newsha = rm.files[0].sha256;
-    assert(ota.apply_core_update(
-               Path.build_filename(staging, "voboost-inject"), rm)
-           == CoreApplyOutcome.APPLIED);
-    assert(FileUtils.test(
-               Path.build_filename(root, "voboost-inject-" + newsha),
-               FileTest.EXISTS));
-    assert(FileUtils.test(
-               Path.build_filename(root, "voboost-inject-" + oldsha),
-               FileTest.EXISTS));
-    assert(link_target(
-               Path.build_filename(root, "voboost-inject")) == "voboost-inject-" + newsha);
-    assert(ota.core_switch_pending());
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-void test_core_apply_bad_sha_rejected() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var ota = new Ota(root, new TrustStore());
-    try {
-        FileUtils.set_contents(
-            Path.build_filename(staging, "voboost-inject"),
-            "totally-different-bytes\n");
-    } catch (FileError e) {
-        assert_not_reached();
-    }
-    var rm = load_release_manifest(ota);
-    assert(ota.apply_core_update(
-               Path.build_filename(staging, "voboost-inject"), rm)
-           == CoreApplyOutcome.REJECTED_BAD_HASH);
-    assert(!ota.core_switch_pending());
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-void test_core_rollback_repoints_to_previous() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var ota = new Ota(root, new TrustStore());
-    string oldsha = write_old_binary(root);
-    copy_file(FIX + "/voboost-inject",
-              Path.build_filename(staging, "voboost-inject"));
-    var rm = load_release_manifest(ota);
-    string newsha = rm.files[0].sha256;
-    ota.apply_core_update(
-        Path.build_filename(staging, "voboost-inject"), rm);
-    assert(ota.core_switch_pending());
-    ota.rollback_core_switch();
-    assert(!ota.core_switch_pending());
-    assert(link_target(
-               Path.build_filename(root, "voboost-inject")) == "voboost-inject-" + oldsha);
-    assert(link_target(
-               Path.build_filename(root, "voboost-inject")) != "voboost-inject-" + newsha);
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-void test_core_confirm_clears_marker_and_gcs_previous() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var ota = new Ota(root, new TrustStore());
-    string oldsha = write_old_binary(root);
-    copy_file(FIX + "/voboost-inject",
-              Path.build_filename(staging, "voboost-inject"));
-    var rm = load_release_manifest(ota);
-    ota.apply_core_update(
-        Path.build_filename(staging, "voboost-inject"), rm);
-    assert(ota.core_switch_pending());
-    ota.confirm_core_switch();
-    assert(!ota.core_switch_pending());
-    assert(!FileUtils.test(
-               Path.build_filename(root, "voboost-inject-" + oldsha),
-               FileTest.EXISTS));
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-// --- release-manifest bounds & malformed entries --------------------------
-
-void test_release_manifest_oversize_rejected() {
-    var ota = new Ota("/data/voboost", new TrustStore());
-    uint8[] sig = read_bytes_or_fail(FIX + "/release-manifest.json.sig");
-    // A pathologically large manifest is rejected before the signature check
-    // (the size bound is enforced first) — DoS guard, release-manifest spec.
-    uint8[] big = new uint8[Ota.MAX_RELEASE_MANIFEST_BYTES + 1];
-    assert(ota.verify_release_manifest(big, sig) == null);
-}
-
-void test_release_manifest_bad_entry_rejected() {
-    var ota = new Ota("/data/voboost", new TrustStore());
-    uint8[] rm = read_bytes_or_fail(FIX + "/release-manifest-bad-entry.json");
-    uint8[] sig = read_bytes_or_fail(
-        FIX + "/release-manifest-bad-entry.json.sig");
-    // A signed manifest whose entry omits a required field is rejected whole.
-    assert(ota.verify_release_manifest(rm, sig) == null);
-}
-
-void test_release_manifest_bad_channel_rejected() {
-    var ota = new Ota("/data/voboost", new TrustStore());
-    uint8[] rm = read_bytes_or_fail(FIX + "/release-manifest-bad-channel.json");
-    uint8[] sig = read_bytes_or_fail(
-        FIX + "/release-manifest-bad-channel.json.sig");
-    // A signed manifest with an invalid channel value is rejected whole.
-    assert(ota.verify_release_manifest(rm, sig) == null);
-}
-
-// --- agent apply: stay-on-old on a partial failure ------------------------
-// Relies on the normative content-addressed contract (a changed/new agent
-// ships at a fresh path, so a failed sibling never corrupts the active set).
-
-void test_agent_apply_partial_failure_stays_on_old() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var trust = new TrustStore();
-    var ota = new Ota(root, trust);
-    DirUtils.create(Path.build_filename(root, "agents"), 0700);
-    // Active set: the single-agent fixture manifest + its payload.
-    copy_file(FIX + "/manifest.json",
-              Path.build_filename(root, "manifest.json"));
-    copy_file(FIX + "/manifest.sig",
-              Path.build_filename(root, "manifest.sig"));
-    copy_file(FIX + "/agents/wm-viewport.js",
-              Path.build_filename(root, "agents/wm-viewport.js"));
-    // Staged set: two fresh agents; agent-y is staged tampered so its sha
-    // mismatches the manifest -> the apply aborts mid-loop.
-    copy_file(FIX + "/manifest-multi.json",
-              Path.build_filename(staging, "manifest.json"));
-    copy_file(FIX + "/manifest-multi.sig",
-              Path.build_filename(staging, "manifest.sig"));
-    copy_file(FIX + "/agents/agent-x.js",
-              Path.build_filename(staging, "agents/agent-x.js"));
-    copy_file(FIX + "/agents/agent-y-bad.js",
-              Path.build_filename(staging, "agents/agent-y.js"));
-    assert(ota.apply_agent_update(staging) == false);
-    // The active manifest is untouched (no swap) and still verifies; its payload
-    // is intact. (The orphan agent-x install is harmless: not referenced.)
-    assert(!FileUtils.test(
-               Path.build_filename(root, "manifest.json.prev"), FileTest.EXISTS));
-    assert(manifest_verifies_at(root, trust));
-    assert(FileUtils.test(
-               Path.build_filename(root, "agents/wm-viewport.js"), FileTest.EXISTS));
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-// --- boot recovery: active present but bad -------------------------------
-
 void test_boot_recovery_restores_when_active_bad() {
     string root = fresh_root();
     var trust = new TrustStore();
     var ota = new Ota(root, trust);
     DirUtils.create(Path.build_filename(root, "agents"), 0700);
-    // Active manifest present but its signature does not verify.
     copy_file(FIX + "/manifest.json",
               Path.build_filename(root, "manifest.json"));
     copy_file(FIX + "/manifest-bad.sig",
               Path.build_filename(root, "manifest.sig"));
     copy_file(FIX + "/agents/wm-viewport.js",
               Path.build_filename(root, "agents/wm-viewport.js"));
-    // A verifying .prev pair exists.
     copy_file(FIX + "/manifest.json",
               Path.build_filename(root, "manifest.json.prev"));
     copy_file(FIX + "/manifest.sig",
@@ -386,75 +396,8 @@ void test_boot_recovery_restores_when_active_bad() {
     assert(ota.recover_manifest());
     assert(manifest_verifies_at(root, trust));
     assert(!FileUtils.test(
-               Path.build_filename(root, "manifest.json.prev"), FileTest.EXISTS));
-    rm_rf(root);
-}
-
-// --- core apply: DoS precheck + power-loss GC safety ----------------------
-
-void test_core_apply_oversize_rejected() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var ota = new Ota(root, new TrustStore());
-    write_old_binary(root);
-    // Stage a binary larger than the signed entry.size -> rejected at the stat
-    // pre-check, before the full read (DoS guard).
-    uint8[] good = read_bytes_or_fail(FIX + "/voboost-inject");
-    string padded = (string) good + string.nfill(1024, 'x');
-    try {
-        FileUtils.set_contents(
-            Path.build_filename(staging, "voboost-inject"), padded);
-    } catch (FileError e) {
-        assert_not_reached();
-    }
-    var rm = load_release_manifest(ota);
-    assert(ota.apply_core_update(
-               Path.build_filename(staging, "voboost-inject"), rm)
-           == CoreApplyOutcome.REJECTED_BAD_HASH);
-    assert(!ota.core_switch_pending());
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-void make_core_symlink(string root, string target_basename) {
-    try {
-        File.new_for_path(Path.build_filename(root, "voboost-inject"))
-        .make_symbolic_link(target_basename);
-    } catch (Error e) {
-        assert_not_reached();
-    }
-}
-
-void write_core_marker(string root, string prev_basename) {
-    try {
-        FileUtils.set_contents(
-            Path.build_filename(root, "run/core-switch-pending"),
-            prev_basename);
-    } catch (FileError e) {
-        assert_not_reached();
-    }
-}
-
-// Power-loss between writing the marker and repointing: stable still points at
-// the file the marker names, so confirm must NOT delete it (else a dangling
-// symlink on the next restart). atomic-apply-rollback "Power-loss during core".
-void test_core_confirm_keeps_active_when_not_repointed() {
-    string root = fresh_root();
-    var ota = new Ota(root, new TrustStore());
-    string sha =
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    string named = "voboost-inject-" + sha;
-    try {
-        FileUtils.set_contents(Path.build_filename(root, named), "B-binary\n");
-    } catch (FileError e) {
-        assert_not_reached();
-    }
-    make_core_symlink(root, named);
-    write_core_marker(root, named);
-    ota.confirm_core_switch();
-    assert(!ota.core_switch_pending());
-    assert(FileUtils.test(Path.build_filename(root, named), FileTest.EXISTS));
-    assert(link_target(Path.build_filename(root, "voboost-inject")) == named);
+               Path.build_filename(root, "manifest.json.prev"),
+               FileTest.EXISTS));
     rm_rf(root);
 }
 
@@ -470,17 +413,20 @@ public static int main(string[] args) {
     Test.add_func("/ota/release-manifest/oversize", test_release_manifest_oversize_rejected);
     Test.add_func("/ota/release-manifest/bad-entry", test_release_manifest_bad_entry_rejected);
     Test.add_func("/ota/release-manifest/bad-channel", test_release_manifest_bad_channel_rejected);
-    Test.add_func("/ota/agent-apply/installs", test_agent_apply_installs_into_root);
-    Test.add_func("/ota/agent-apply/bad-sig", test_agent_apply_rejects_bad_sig_and_keeps_active);
-    Test.add_func("/ota/agent-apply/partial-failure", test_agent_apply_partial_failure_stays_on_old);
+    Test.add_func("/ota/apk-extract/manifest", test_apk_extract_manifest);
+    Test.add_func("/ota/apk-extract/binary", test_apk_extract_binary);
+    Test.add_func("/ota/apk-extract/binary-deflated", test_apk_extract_binary_deflated);
+    Test.add_func("/ota/apk-extract/missing", test_apk_extract_missing_entry);
+    Test.add_func("/ota/core-apk-apply/success", test_core_apk_apply_success);
+    Test.add_func("/ota/core-apk-apply/deflated", test_core_apk_apply_deflated);
+    Test.add_func("/ota/core-apk-apply/bad-embedded-sig", test_core_apk_apply_bad_embedded_sig);
+    Test.add_func("/ota/core-apk-apply/no-apk", test_core_apk_apply_no_apk);
+    Test.add_func("/ota/core-apk-apply/rollback", test_core_apk_rollback_restores_prev);
+    Test.add_func("/ota/core-apk-apply/confirm",
+                  test_core_apk_confirm_clears_marker_and_removes_prev);
+    Test.add_func("/ota/core-apk-apply/rollback-no-prev", test_core_apk_rollback_no_prev_target);
     Test.add_func("/ota/boot-recovery/restores-prev", test_boot_recovery_restores_prev);
     Test.add_func("/ota/boot-recovery/noop", test_boot_recovery_noop_when_active_ok);
     Test.add_func("/ota/boot-recovery/active-bad", test_boot_recovery_restores_when_active_bad);
-    Test.add_func("/ota/core-apply/success", test_core_apply_success);
-    Test.add_func("/ota/core-apply/bad-sha", test_core_apply_bad_sha_rejected);
-    Test.add_func("/ota/core-apply/oversize", test_core_apply_oversize_rejected);
-    Test.add_func("/ota/core-apply/rollback", test_core_rollback_repoints_to_previous);
-    Test.add_func("/ota/core-apply/confirm", test_core_confirm_clears_marker_and_gcs_previous);
-    Test.add_func("/ota/core-apply/confirm-powerloss", test_core_confirm_keeps_active_when_not_repointed);
     return Test.run();
 }
