@@ -217,12 +217,16 @@ verify-sig:
 
 .PHONY: release-manifest
 
-# OTA release-manifest generator (owned by the ota change). Scans DIR for files,
-# labels every entry with CHANNEL, stamps VERSION, and emits unsigned
-# build/release-manifest.json with per-file path/channel/sha256/size/version.
-# Signing is the existing `make sign` (the ci release workflow calls both); the
-# daemon re-verifies the signed manifest with the embedded key on apply.
-# stat is probed both ways (Linux -c%s, macOS -f%z) so it runs locally and in CI.
+# OTA release-manifest generator (owned by the ota-core-selfupdate change).
+# APK-level: scans DIR for APKs, labels every entry with CHANNEL, stamps
+# VERSION, and emits unsigned build/release-manifest.json with per-APK
+# path/channel/sha256/size/version. This repo's CI emits only the `core` channel
+# (the daemon APK, a single entry); the `agents`/`app` channels are produced by
+# the voboost app repo. Signing is the existing `make sign` (the ci release
+# workflow calls both); the OTA client verifies the signed manifest, and the
+# daemon re-verifies the staged APK's embedded manifest (not the release
+# manifest) at apply time. stat is probed both ways (Linux -c%s, macOS -f%z)
+# so it runs locally and in CI.
 release-manifest:
 	@test -n "$(DIR)"     || { echo "release-manifest: DIR=<release-dir> required"         >&2; exit 2; }
 	@test -n "$(CHANNEL)" || { echo "release-manifest: CHANNEL=<agents|core|app> required"  >&2; exit 2; }
