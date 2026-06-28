@@ -129,15 +129,21 @@ public async void run() {
     // mode (running targets are still injected, but new spawns are missed
     // until the daemon is restarted).
     //
-    // Emulator escape hatch: frida-core 17.11.0 Zymbiote injection prep
-    // (used by enable_spawn_gating on the Linux local-device backend) hits
-    // a g_assert in gum_alloc_n_pages on Android API 28 arm64 emulators
-    // (gum_elf_module_load -> gum_metal_array_append -> mmap RWX near a
-    // system module returns NULL). The g_assert aborts the whole daemon
-    // before enable_gating() can return false, so the graceful attach-only
-    // degradation below never runs. Setting VOBOOST_SKIP_SPAWN_GATING=1
-    // skips the call entirely so the daemon survives in attach-only mode
-    // for emulator integration testing; attach injection uses Linjector
+    // Emulator escape hatch: frida-core 17.11.0 local-backend spawn-gating
+    // aborts on Android API 28 arm64 emulators. enable_spawn_gating ->
+    // RoboLauncher.ensure_loaded -> inject_zymbiote (zygote) ->
+    // do_prepare_zymbiote_injection -> gum_linker_api_try_init ->
+    // _gum_native_module_get_elf_module(linker64) -> gum_elf_module_load ->
+    // gum_metal_array_append -> gum_alloc_n_pages(GUM_PAGE_RW) hits
+    // g_assert(result != NULL) and SIGABRTs the whole daemon before
+    // enable_gating() can return false, so the graceful attach-only
+    // degradation below never runs. The abort is in C (g_assert) and cannot
+    // be caught by Vala try/catch. Verified: standalone frida-server 17.11.0
+    // (droidy backend, no in-process Zymbiote prep) works fully on this
+    // emulator (spawn + inject), so the crash is specific to the embedded
+    // local backend's Zymbiote injection into zygote. Setting
+    // VOBOOST_SKIP_SPAWN_GATING=1 skips enable_spawn_gating so the daemon
+    // survives in attach-only mode; attach injection uses Linjector
     // (inject_running -> linjector.inject_library_resource), not Zymbiote,
     // so it is unaffected. Production devices never set this.
     if (Environment.get_variable("VOBOOST_SKIP_SPAWN_GATING") == "1") {
