@@ -86,9 +86,12 @@ public TrustStore trust { get; construct; }
 public const int MAX_RELEASE_MANIFEST_BYTES = 1048576;
 public const int MAX_RELEASE_ENTRIES = 4096;
 // Bounds for the APK ZIP reader (design D5): a pathologically large archive
-// must not exhaust memory. The daemon APK is tens of MB; 256 MB is a generous
+// must not exhaust memory. The daemon APK is tens of MB; 64 MB is a generous
 // upper bound that rejects anything unreasonable before parsing.
-public const int64 MAX_APK_BYTES = 268435456;
+// INJ-04: was 256 MB, which allowed FileUtils.get_data to allocate up to
+// 256 MB before the post-read size check. 64 MB is still 4-8x a typical
+// daemon APK and bounds the peak memory of the ZIP reader.
+public const int64 MAX_APK_BYTES = 67108864;
 public const int MAX_APK_ENTRIES = 65536;
 
 // Fixed names. OTA applies are serialized on the daemon's single-threaded
