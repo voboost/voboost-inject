@@ -134,9 +134,9 @@ All three files are specified in `openspec/specs/app-interface`.
   (see *Writing agents*); `state` is `ready` or `degraded`; `injections[].state`
   is one of `active`, `failed`, `skipped-coexist`, `waiting`, `quarantined`.
 
-- **`staging/` + `update-ready`** *(app → daemon, app zone)* — the OTA staging
-  area. The app downloads updated agents/manifest, writes them into
-  `staging/`, and creates the `update-ready` marker last. The daemon
+- **`staging/` + `core-update-ready`** *(app → daemon, app zone)* — the OTA
+  staging area. The app downloads updated agents/manifest, writes them into
+  `staging/`, and creates the `core-update-ready` marker last. The daemon
   re-verifies everything against its embedded key before swapping it into the
   trusted zone.
 
@@ -229,13 +229,15 @@ The device-safety rules above fire at fixed thresholds compiled into the daemon
 | Core | Content-addressed install + self-shutdown; init restarts the new binary | Yes |
 
 - Agent updates apply immediately (before the first injection on boot, or at
-  runtime when the `update-ready` marker appears).
-- Core updates install the new binary as `voboost-inject-<sha>`, repoint the
-  stable launch path, and self-shutdown; Android init restarts the service.
+  runtime when the `core-update-ready` marker appears).
+- Core updates rename the running binary aside to `voboost-inject.prev`,
+  install the new binary at the stable launch path `voboost-inject`, and
+  self-shutdown; Android init restarts the service. The previous binary is
+  kept as `.prev` for rollback.
 - If the new binary starts DEGRADED, it rolls back to the previous binary
   automatically.
-- The `update-ready` marker is single-use: consumed after any apply attempt
-  (success or verified failure).
+- The `core-update-ready` marker is single-use: consumed after any apply
+  attempt (success or verified failure).
 
 ## Security
 
@@ -500,7 +502,7 @@ On a provisioned device the daemon owns the root zone `/data/voboost`:
 ```
 /data/voboost/
   voboost-inject                stable launch path the init hook execs
-  voboost-inject-<sha>          content-addressed core binary (OTA)
+  voboost-inject.prev           previous core binary, kept for OTA rollback
   manifest.json + manifest.sig  active signed agent-set manifest
   manifest.json.prev + .sig     one-deep rollback copy
   agents/<...>                  verified agent payloads
@@ -626,7 +628,7 @@ Triggered by a `v*` tag:
 2. **Version gate** — fails if the tag does not match `v$version` from
    `meson.build`
 3. `make lint` + `make test` — quality gates re-run (a tag cannot bypass them)
-4. Android NDK setup (`r27d`, SHA-pinned action)
+4. Android NDK setup (`r29`, SHA-pinned action)
 5. `make build-android` — arm64-v8a, fully static
 6. `llvm-strip` the device binary
 7. `make release-manifest` — generates `build/release-manifest.json`
@@ -672,7 +674,7 @@ frida-core, frida-gum, all pinned to tag `17.11.0`), fetched and cached on
 | `safety.vala` | Rate-limit, quarantine, panic-quarantine, coexistence skip, kill-switch |
 | `status.vala` | Atomic `inject-status.json` writer (temp + rename, no symlink follow) |
 | `ota.vala` | OTA apply/rollback: agent manifest swap, core install + self-shutdown |
-| `app_zone_watcher.vala` | GFileMonitor on `inject.json` and `staging/update-ready` |
+| `app_zone_watcher.vala` | GFileMonitor on `inject.json` and `staging/core-update-ready` |
 | `process_watcher.vala` | Event-driven target tracking via frida spawn/death signals |
 | `log.vala` | Root-only daily log, 7-day retention, shared format |
 
