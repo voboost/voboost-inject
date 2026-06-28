@@ -22,7 +22,13 @@ inject_test_srcs = files(
   meson.project_source_root() / 'src/safety.vala',
   meson.project_source_root() / 'src/ota.vala',
 )
-inject_test_vala_args = ['--pkg=posix']
+inject_test_vala_args = [
+  '--pkg=posix',
+  # frida's meson fork does not auto-derive --pkg flags from `dependencies:`
+  # the way upstream meson does (see src/meson.build for the same fix).
+  '--pkg=gio-2.0',
+  '--pkg=json-glib-1.0',
+]
 # Inline custom_target — no scripts/ file needed.
 inject_pubkey = custom_target(
   'test-embedded-pubkey',
