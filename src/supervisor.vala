@@ -748,7 +748,26 @@ private bool kill_switched() {
 // frida.open () and goes DEGRADED on failure BEFORE any injection path is
 // reachable, so the device is always open by the time this gate is hit.
 // Falls back to the host-test env-var escape hatch on non-Android.
+//
+// INJ-02: boot_completed() is polled on the GMainLoop thread. Each call
+// used to fork+wait getprop, blocking frida event dispatch. Once boot is
+// confirmed (sys.boot_completed=1), the value is monotonic for the rest
+// of the boot, so cache it and skip the spawn_sync on subsequent polls.
+private static bool boot_cached = false;
+private static bool boot_resolved = false;
+
 private bool boot_completed() {
+    // Monotonic cache: once boot is confirmed, never fork again.
+    if (boot_resolved) {
+        return boot_cached;
+    }
+    // Host-test escape hatch: allow tests to override boot state without
+    // spawning getprop. Checked first so host tests never fork.
+    if (Environment.get_variable("VOBOOST_BOOT_COMPLETED") == "1") {
+        boot_resolved = true;
+        boot_cached = true;
+        return true;
+    }
     try {
         string[] argv = { "getprop", "sys.boot_completed" };
         string stdout_buf;
@@ -757,14 +776,17 @@ private bool boot_completed() {
                            SpawnFlags.SEARCH_PATH, null,
                            out stdout_buf, null, out exit_status);
         if (exit_status == 0 && stdout_buf.strip() == "1") {
+            // Boot is monotonic: cache the positive result so the polling
+            // loop never forks getprop again.
+            boot_resolved = true;
+            boot_cached = true;
             return true;
         }
     } catch (Error e) {
         // getprop not available (non-Android host or test env); fall
-        // through to the env-var escape hatch used in host tests.
+        // through to the env-var escape hatch checked above.
     }
-    // Host-test escape hatch: allow tests to override boot state.
-    return Environment.get_variable("VOBOOST_BOOT_COMPLETED") == "1";
+    return false;
 }
 
 private void write_status_safe() {
