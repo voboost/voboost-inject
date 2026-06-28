@@ -13,6 +13,20 @@ export MACOS_CERTID ?= -
 VALA_LINT_REPO ?= https://github.com/vala-lang/vala-lint.git
 VALA_LINT_REV ?= 0.1.0
 
+# frida's meson fork (github.com/frida/meson), pinned by frida-core's
+# releng/meson submodule. Standard meson cannot build frida's native
+# (build-machine) subprojects — e.g. quickjs for quickcompile — in a cross
+# build, so `make build-android` configures via this instead of system meson.
+FRIDA_MESON ?= $(PWD)/subprojects/frida-core/releng/meson/meson.py
+
+# Python interpreter used to launch frida's meson. MUST still ship the stdlib
+# `distutils` module (removed in Python 3.12, PEP 0632): glib's gdbus-codegen
+# (run as a build-machine tool during ninja) imports `distutils.version`.
+# macOS system python3 (/usr/bin/python3, 3.9) has distutils; Homebrew's
+# python3 (3.12+/3.14) does not. On Linux, /usr/bin/python3 is 3.x with
+# distutils on older distros; CI installs python3.11 (see release.yml).
+PYTHON_FOR_MESON ?= /usr/bin/python3
+
 .PHONY: init setup build lint lint-fix test check key-dev
 
 # From a clean clone to a ready environment, identically locally and in CI.
@@ -83,12 +97,28 @@ init:
 		ninja -C "$$src/build" install; \
 		rm -rf "$$src"; \
 	fi
+	@if [ -f "$(FRIDA_MESON)" ]; then \
+		echo "init: frida-meson already present; skipping its init"; \
+	else \
+		echo "init: initializing frida-core releng + meson submodules (frida-meson, required for cross-builds)"; \
+		git -C subprojects/frida-core submodule update --init --recursive releng; \
+	fi
+	@echo "init: patching frida-meson for libc++ hardening mode (macOS 26.2 SDK compat)"
+	@cd subprojects/frida-core/releng/meson && \
+		git apply --check ../../../../subprojects/packagefiles/frida-meson-libcpp-hardening-mode.patch 2>/dev/null && \
+		git apply ../../../../subprojects/packagefiles/frida-meson-libcpp-hardening-mode.patch || \
+		echo "init: frida-meson libc++ patch already applied or not needed; skipping"
 	rm -rf $(BUILD_DIR)
 	$(MAKE) key-dev
 	$(MAKE) setup
 
+# Configure via frida's meson (PYTHON_FOR_MESON + FRIDA_MESON), not the system
+# meson: frida-core's compat/build.py (run during ninja) imports frida-meson's
+# `mesonbuild` and pickle-loads the coredata.dat written here — if system meson
+# wrote it, the pickle is incompatible (ModuleNotFoundError: mesonbuild.options).
+# Using frida-meson for both setup and build-android keeps them consistent.
 setup:
-	meson setup $(BUILD_DIR)
+	$(PYTHON_FOR_MESON) $(FRIDA_MESON) setup $(BUILD_DIR)
 
 build:
 	ninja -C $(BUILD_DIR)
@@ -145,9 +175,28 @@ ANDROID_BUILD_DIR ?= build-android
 .PHONY: build-android
 
 # Cross-compile for Android arm64-v8a via NDK.
-# Requires ANDROID_NDK_HOME; the NDK toolchain binaries must be on PATH.
+# Requires ANDROID_NDK_HOME; the NDK toolchain PATH is derived
+# automatically (mirrors CI's "Put NDK toolchain on PATH" step).
+# Configures with frida's meson (FRIDA_MESON, provisioned by
+# init) — standard meson cannot build frida's native subprojects
+# (quickjs for quickcompile) here.
+# Launched via PYTHON_FOR_MESON (must ship `distutils` for glib's gdbus-codegen).
+# -Dfrida-core:connectivity=disabled: the daemon is local-backend-only (no TLS/
+# ICE); connectivity pulls in gioopenssl/glib-networking, which fails to provide
+# the gioopenssl dependency unless glib-networking is built static (it is, via
+# the global default_library=static), but TLS/ICE is unused anyway.
 build-android:
-	meson setup $(ANDROID_BUILD_DIR) --cross-file config/android-cross.ini
+	@test -n "$(ANDROID_NDK_HOME)" || \
+		{ echo "build-android: ANDROID_NDK_HOME not set" >&2; exit 1; }
+	@ndk_bin=$$(echo "$(ANDROID_NDK_HOME)"/toolchains/llvm/prebuilt/*/bin); \
+	test -d "$$ndk_bin" || \
+		{ echo "build-android: NDK toolchain not found" >&2; exit 1; }; \
+	echo "build-android: PATH += $$ndk_bin"; \
+	export PATH="$$ndk_bin:$$PATH"; \
+	export ANDROID_NDK_ROOT="$(ANDROID_NDK_HOME)"; \
+	$(PYTHON_FOR_MESON) $(FRIDA_MESON) setup $(ANDROID_BUILD_DIR) \
+		--cross-file config/android-cross.ini \
+		-Dfrida-core:connectivity=disabled && \
 	ninja -C $(ANDROID_BUILD_DIR)
 
 .PHONY: sign verify-sig

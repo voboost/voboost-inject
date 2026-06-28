@@ -454,17 +454,31 @@ Builds are release-only (no debug configuration):
 
 ```sh
 make build          # host build: release, LTO, frida-core static, dynamic host libs (for tests)
-make build-android  # device build: arm64-v8a, fully static (-static), needs ANDROID_NDK_HOME
+make build-android  # device build: arm64-v8a, frida/glib stack static, bionic dynamic
 ```
 
 `make build` keeps the symbol table (host tests need it); strip is applied at
-install time (`meson install --strip`). The device build is self-contained:
-frida-core bundles glib/gio/json-glib and ed25519 verify uses the Monocypher
-subproject, so nothing extra is provisioned on the device.
+install time (`meson install --strip`). The device build is self-contained for
+the frida/glib stack: every bundled subproject (frida-core, glib, gio,
+json-glib, monocypher, ...) is statically linked via the global
+`default_library=static`, so no glib/gio/json-glib is provisioned on the device.
+The bionic system libs (libc, liblog, libz, libm, libdl) link dynamically — NDK
+r29 ships no static bionic, and bionic is always present on Android. The daemon
+is local-backend-only, so `frida-core:connectivity` (TLS/ICE) is disabled.
 
-`make build-android` needs the Android NDK in `ANDROID_NDK_HOME` (and the NDK
-toolchain binaries on `PATH`). CI pins NDK **r27d** — use the same locally for
+`make build-android` needs the Android NDK in `ANDROID_NDK_HOME`; the NDK
+toolchain PATH is derived automatically from it (no manual PATH setup). CI pins
+NDK **r29** — frida-core 17.11.0's releng requires exactly major version 29
+(`NDK_REQUIRED=29`); r27/r27d are rejected. Use the same locally for
 reproducible device builds.
+
+Both `make setup` and `make build-android` configure via frida's own meson fork
+(provisioned by `make init` from `frida-core`'s `releng/meson` submodule), not
+the system meson — frida-gum's `quickcompile` (`native: true`) needs its QuickJS
+subproject built for the build machine, which only frida's meson does. frida-meson
+is launched via `PYTHON_FOR_MESON` (default `/usr/bin/python3`), which must ship
+the stdlib `distutils` module (removed in Python 3.12) — glib's `gdbus-codegen`
+imports it.
 
 ### Lint and test
 

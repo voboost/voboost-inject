@@ -38,15 +38,25 @@ inject_deps = [
 inject_vala_args = [
   '--pkg=posix',
   '--vapidir', meson.current_source_dir(),
+  # frida's meson fork does not auto-derive --pkg flags from `dependencies:`
+  # the way upstream meson does, so the gio/json-glib VAPIs (which frida-core's
+  # own VAPI and our sources reference: GLib.Cancellable, Json.Object, etc.)
+  # must be named explicitly. frida-core does the same in its own meson.build.
+  '--pkg=gio-2.0',
+  '--pkg=json-glib-1.0',
 ]
 
 # Host build (make build) links dynamically so it builds on the macOS dev host
 # (a full -static link is unsupported there). The Android device build
-# (make build-android, a cross build) is fully static so the daemon is
-# self-contained on a device that has no glib/gio/json-glib installed (frida-core
-# bundles those statically; ed25519 is the monocypher subproject, statically linked
-# — no system crypto lib). frida-core is statically linked via `static: true` (D10a).
-inject_link_args = meson.is_cross_build() ? ['-static'] : []
+# (make build-android, a cross build) links every bundled subproject (frida-core,
+# glib, gio, json-glib, monocypher, ...) statically via `default_library=static`
+# (set globally in the root project) and `static: true` on the frida-core dep
+# (D10a), so the daemon is self-contained for the frida/glib stack — no glib/gio/
+# json-glib on the device. The bionic system libs (libc, liblog, libz, libm,
+# libdl) are linked dynamically: NDK r29 ships no static bionic (libc.a etc.
+# were removed), and bionic is always present on Android anyway. A `-static`
+# link would fail with "unable to find library -llog" (no liblog.a in the NDK).
+inject_link_args = meson.is_cross_build() ? ['-Wl,-Bstatic', '-Wl,-Bdynamic'] : []
 
 # Single source of truth for the daemon version is meson.build's project()
 # version (ci-versioning: the version SHALL NOT be defined elsewhere). Generate

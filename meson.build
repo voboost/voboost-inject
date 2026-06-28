@@ -12,6 +12,15 @@ project(
     'buildtype=release',
     'b_lto=true',
     'b_staticpic=true',
+    # Global static: every transitive subproject (pcre2, xz, sqlite, libpsl,
+    # nghttp2, elfutils, glib-networking, ...) builds a static archive so the
+    # Android `-static` link has no dynamic objects to reject, and
+    # glib-networking's gioopenssl is built as a static lib (its
+    # meson.override_dependency('gioopenssl', ...) only runs in the
+    # `if build_static:` branch — `build_static = default_library != 'shared'`).
+    # The per-subproject `frida-core:default_library=static` below is kept for
+    # clarity/frida-core's own option pinning.
+    'default_library=static',
     'frida-core:default_library=static',
     'frida-core:frida_version=17.11.0',
     'frida-core:local_backend=enabled',
@@ -37,4 +46,9 @@ project(
 subdir('src')
 
 # init change: host-side test harness (extended by inject with vala unit tests).
-subdir('test')
+# Tests are host-only: skip them in a cross build (make build-android) — they
+# would otherwise compile for the cross target and fail (no test runner on the
+# device), and they are not part of the release artifact.
+if not meson.is_cross_build()
+  subdir('test')
+endif
