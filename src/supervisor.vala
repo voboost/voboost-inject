@@ -128,7 +128,23 @@ public async void run() {
     // Spawn-gating failure is not fatal: the daemon degrades to attach-only
     // mode (running targets are still injected, but new spawns are missed
     // until the daemon is restarted).
-    if (!yield this.frida.enable_gating()) {
+    //
+    // Emulator escape hatch: frida-core 17.11.0 Zymbiote injection prep
+    // (used by enable_spawn_gating on the Linux local-device backend) hits
+    // a g_assert in gum_alloc_n_pages on Android API 28 arm64 emulators
+    // (gum_elf_module_load -> gum_metal_array_append -> mmap RWX near a
+    // system module returns NULL). The g_assert aborts the whole daemon
+    // before enable_gating() can return false, so the graceful attach-only
+    // degradation below never runs. Setting VOBOOST_SKIP_SPAWN_GATING=1
+    // skips the call entirely so the daemon survives in attach-only mode
+    // for emulator integration testing; attach injection uses Linjector
+    // (inject_running -> linjector.inject_library_resource), not Zymbiote,
+    // so it is unaffected. Production devices never set this.
+    if (Environment.get_variable("VOBOOST_SKIP_SPAWN_GATING") == "1") {
+        Log.err("supervisor",
+                "spawn-gating skipped (VOBOOST_SKIP_SPAWN_GATING=1); "
+                + "attach-only mode");
+    } else if (!yield this.frida.enable_gating()) {
         Log.err("supervisor",
                 "spawn-gating failed; attach-only mode");
     }
