@@ -137,6 +137,18 @@ public void write_atomic() throws Error {
         FileUtils.unlink(tmp);
         throw new IOError.FAILED("status rename failed");
     }
+    // fsync the parent directory so the rename (a directory-entry update)
+    // is durable on stable storage. The file's own data was fsynced above;
+    // without a dir fsync a crash after rename could leave the old name
+    // pointing at the pre-rename inode (the new bytes survive on disk but
+    // are unreachable). Open the dir with O_RDONLY|O_DIRECTORY (no symlink
+    // follow: O_DIRECTORY already refuses non-directories) and best-effort
+    // fsync — a failure here only delays durability, never corrupts.
+    int dfd = Posix.open(dir, Posix.O_RDONLY | Posix.O_DIRECTORY);
+    if (dfd >= 0) {
+        Posix.fsync(dfd);
+        Posix.close(dfd);
+    }
 }
 }
 }
