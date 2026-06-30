@@ -594,56 +594,76 @@ private static bool read_local_entry(uint8[] apk, int offset,
         return true;
     }
     if (method == 8) {
-        // Deflate (raw, no zlib header): inflate via ZlibDecompressor.
+        // Deflate (raw, no zlib header): inflate via a streaming converter.
         uint8[] comp = apk[data_off : dend];
         return inflate_raw(comp, uncomp_size, out data);
     }
     return false;  // unsupported method
 }
 
-// Inflate a raw deflate stream (no zlib header) into `out data`. Uses
-// ZlibDecompressor with ZlibCompressorFormat.RAW. The uncompressed size is a
-// hint; the whole compressed buffer is fed to the converter at once (deflate
-// streams in an APK are small relative to the APK bound) and the output
-// buffer is grown if the hint was too small.
+// Inflate a raw deflate stream (no zlib header) into `out data`. Uses a
+// GZlibDecompressor (RAW format) wrapped in a GConverterInputStream over a
+// MemoryInputStream, reading in small chunks. This bounds peak memory to the
+// entry's uncompressed size (plus one chunk) instead of allocating up to
+// MAX_APK_BYTES per retry iteration as the previous ZlibDecompressor.convert
+// loop did (R4-INJ-01). The output buffer is capped at uncomp_size when the
+// hint is positive and trustworthy; a zero/lying hint falls back to a
+// growable buffer that is still bounded by MAX_APK_BYTES.
 private static bool inflate_raw(uint8[] comp, int64 uncomp_size,
                                 out uint8[] data) {
     data = new uint8[0];
-    // Allocate generously: the stored uncompressed size is authoritative for
-    // well-formed APKs; fall back to a growing buffer if it is zero/lying.
+    // Output cap: the stored uncompressed size is authoritative for
+    // well-formed APKs. A zero/lying hint is handled by the growable path
+    // below; either way the total output never exceeds MAX_APK_BYTES.
     size_t out_cap = (size_t) (uncomp_size > 0
-                               ? uncomp_size : comp.length * 4);
+                              ? uncomp_size : comp.length * 4);
     if (out_cap < 64) {
         out_cap = 64;
     }
     if (out_cap > MAX_APK_BYTES) {
         return false;
     }
-    // A converter is single-use; retry with a fresh one + a bigger buffer if
-    // the hint was too small.
-    while (true) {
-        var dec = new ZlibDecompressor(ZlibCompressorFormat.RAW);
-        var out_buf = new uint8[out_cap];
-        size_t bytes_read = 0;
-        size_t bytes_written = 0;
-        try {
-            var res = dec.convert(comp, out_buf, ConverterFlags.NONE,
-                                  out bytes_read, out bytes_written);
-            if (res == ConverterResult.FINISHED
-                || (bytes_read == comp.length && bytes_written > 0)) {
-                data = out_buf[0 : bytes_written];
-                return true;
+    var dec = new ZlibDecompressor(ZlibCompressorFormat.RAW);
+    var min = new MemoryInputStream.from_data(comp);
+    var cin = new ConverterInputStream(min, dec);
+    // Read in 64 KiB chunks; grow the output buffer only if the hint was
+    // too small (uncomp_size == 0 or lying), still capped at MAX_APK_BYTES.
+    const size_t CHUNK = 65536;
+    var out_buf = new uint8[out_cap];
+    size_t total = 0;
+    var tmp = new uint8[CHUNK];
+    try {
+        while (true) {
+            ssize_t n = cin.read(tmp);
+            if (n == 0) {
+                break;  // EOF: stream fully inflated
             }
-        } catch (Error e) {
-            return false;
+            if (total + n > out_cap) {
+                // Hint was too small: grow (only the growable path reaches
+                // here; a positive trustworthy hint that underflows means a
+                // corrupt stream and is rejected).
+                size_t need = total + (size_t) n;
+                while (need > out_cap) {
+                    if (out_cap * 2 > MAX_APK_BYTES) {
+                        return false;
+                    }
+                    out_cap *= 2;
+                }
+                var grown = new uint8[out_cap];
+                Posix.memcpy(grown, out_buf, total);
+                out_buf = grown;
+            }
+            Posix.memcpy(&out_buf[total], tmp, (size_t) n);
+            total += (size_t) n;
         }
-        // Not finished and not all input consumed: the output buffer was too
-        // small. Grow and retry with a fresh converter.
-        if (out_cap * 2 > MAX_APK_BYTES) {
-            return false;
-        }
-        out_cap *= 2;
+    } catch (Error e) {
+        return false;
     }
+    if (total == 0) {
+        return false;  // empty inflate is not a valid APK entry
+    }
+    data = out_buf[0 : total];
+    return true;
 }
 
 private static int read_le16(uint8[] b, int off) {
