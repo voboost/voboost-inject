@@ -15,6 +15,7 @@ inject_test_deps = [
 inject_test_srcs = files(
   meson.project_source_root() / 'src/ed25519.vapi',
   meson.project_source_root() / 'src/log.vala',
+  meson.project_source_root() / 'src/boot.vala',
   meson.project_source_root() / 'src/trust_store.vala',
   meson.project_source_root() / 'src/manifest.vala',
   meson.project_source_root() / 'src/plan_reader.vala',
@@ -61,7 +62,7 @@ inject_fixtures = custom_target(
   ],
 )
 
-foreach t : ['manifest', 'plan', 'safety', 'status', 'trust_store', 'log', 'ota']
+foreach t : ['manifest', 'plan', 'safety', 'status', 'trust_store', 'log', 'ota', 'boot']
   exe = executable(
     t + '_test',
     [t + '_test.vala'] + inject_test_srcs + [inject_pubkey],

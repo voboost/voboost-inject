@@ -753,40 +753,15 @@ private bool kill_switched() {
 // used to fork+wait getprop, blocking frida event dispatch. Once boot is
 // confirmed (sys.boot_completed=1), the value is monotonic for the rest
 // of the boot, so cache it and skip the spawn_sync on subsequent polls.
-private static bool boot_cached = false;
-private static bool boot_resolved = false;
+// Boot-state cache + getprop fork. Extracted to BootState (src/boot.vala) so
+// the monotonic-cache + escape-hatch logic is unit-testable without linking
+// frida-core (Supervisor itself depends on FridaController). The frida
+// spawn-gating deadlock note above still applies: getprop runs via spawn_sync
+// while global spawn-gating is enabled.
+private BootState boot_state = new BootState();
 
 private bool boot_completed() {
-    // Monotonic cache: once boot is confirmed, never fork again.
-    if (boot_resolved) {
-        return boot_cached;
-    }
-    // Host-test escape hatch: allow tests to override boot state without
-    // spawning getprop. Checked first so host tests never fork.
-    if (Environment.get_variable("VOBOOST_BOOT_COMPLETED") == "1") {
-        boot_resolved = true;
-        boot_cached = true;
-        return true;
-    }
-    try {
-        string[] argv = { "getprop", "sys.boot_completed" };
-        string stdout_buf;
-        int exit_status;
-        Process.spawn_sync(null, argv, null,
-                           SpawnFlags.SEARCH_PATH, null,
-                           out stdout_buf, null, out exit_status);
-        if (exit_status == 0 && stdout_buf.strip() == "1") {
-            // Boot is monotonic: cache the positive result so the polling
-            // loop never forks getprop again.
-            boot_resolved = true;
-            boot_cached = true;
-            return true;
-        }
-    } catch (Error e) {
-        // getprop not available (non-Android host or test env); fall
-        // through to the env-var escape hatch checked above.
-    }
-    return false;
+    return this.boot_state.boot_completed();
 }
 
 private void write_status_safe() {
