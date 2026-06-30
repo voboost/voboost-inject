@@ -88,6 +88,7 @@ inject_sources = files(
   'ed25519.vapi',
   'frida-stubs.vapi',
   'log.vala',
+  'boot.vala',
   'trust_store.vala',
   'manifest.vala',
   'plan_reader.vala',
