@@ -27,8 +27,6 @@ void test_valid_signature_parses() {
     var a = m.find("wm-viewport");
     assert(a != null);
     assert(a.process == "system_server");
-    assert(a.kind == AgentKind.JS);
-    assert(a.entrypoint == "");
 }
 
 void test_bad_signature_rejected() {

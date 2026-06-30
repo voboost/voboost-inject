@@ -14,9 +14,8 @@ cover them; run them manually on-device after `make build-android` and deploymen
 1. Spawn-gating (earliest reach): a gated target receives its agents before it runs its own
    code, then resumes. Verify the agent's effect is present from process start.
 2. Attach (already running): a target alive at READY is attached and injected.
-3. js / native routing: a `js` agent loads on QuickJS via a session script and receives its
-   config through `rpc.exports.init`; a `native` agent is injected as a frida-gum `.so` via
-   `inject_library_blob` (config in the `data` arg) with no QuickJS in a native-only process.
+3. JavaScript injection: an agent loads on QuickJS via a per-process session script and
+   receives its config through `rpc.exports.init` (`parameters.config`).
 4. Guaranteed resume: force an injection failure/timeout on a gated process; confirm it is
    resumed anyway and never left suspended (boot never hangs).
 5. Coexistence skip: pre-load another Frida tool into a target; the daemon skips it and records
