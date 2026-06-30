@@ -37,8 +37,6 @@ cat > "$here/manifest.json" <<JSON
       "file": "agents/wm-viewport.js",
       "sha256": "$sha",
       "process": "system_server",
-      "kind": "js",
-      "entrypoint": "",
       "boot": false
     }
   ]

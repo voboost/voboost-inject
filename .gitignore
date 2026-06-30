@@ -20,3 +20,4 @@ test/fixtures/release-manifest-bad-channel.json
 test/fixtures/release-manifest-bad-channel.json.sig
 test/fixtures/voboost-inject
 subprojects/.wraplock
+code-review-*.md

@@ -34,33 +34,18 @@ session, so enabling spawn-gating adds no per-process attach cost to the rest of
   target
 
 ### Requirement: Per-agent runtime routing and per-process lazy runtime
-The daemon SHALL route each agent by its manifest `kind`. A `js` agent runs JavaScript on
-frida-core's QuickJS runtime (GumJS) via a per-process session script (`create_script`). A
-`native` agent is a frida-gum native agent — a compiled `.so` injected directly into the target
-via frida-core's library-injection API (`inject_library_blob`/`inject_library_file`, with an
-exported `entrypoint`) and runs with NO JavaScript engine. The QuickJS runtime SHALL be loaded in
-a target process only when that process receives at least one `js` agent; a process that receives
-only `native` agents SHALL never load QuickJS, and a process that receives no agent SHALL never be
-attached (it is resumed immediately — see Spawn-gating).
-
-NOTE: This is per-process lazy loading, not yet a link-time removal of QuickJS from the binary.
-Dropping QuickJS from the binary entirely is the end state of the JS→hybrid→native migration
-(`frida.md`): once no `js` agents remain, frida-core is built without any JS engine and the agents
-run as pure frida-gum native libraries. That binary-level compile-out requires a separate
-frida-core build option and is out of scope for this change; the footprint win realized here is
-QuickJS-instead-of-V8 plus per-process lazy loading.
+The daemon SHALL run every agent as JavaScript on frida-core's QuickJS runtime
+(GumJS) via a per-process session script (`create_script`). Every target process that
+receives at least one agent SHALL be attached (a session opened) and the QuickJS runtime
+SHALL be loaded in it. A process that receives no agent SHALL never be attached (it is
+resumed immediately — see Spawn-gating).
 
 #### Scenario: Process receives no agent
 - **WHEN** a spawned process is not a target of any enabled agent
 - **THEN** frida is never attached to it and no runtime is loaded in it
 
-#### Scenario: Process receives only native agents
-- **WHEN** a target process receives only `native` agents
-- **THEN** they are injected as frida-gum native libraries (no `Session` script) and QuickJS is
-  never loaded in that process
-
-#### Scenario: Process receives a js agent
-- **WHEN** a target process receives a `js` agent
+#### Scenario: Process receives an agent
+- **WHEN** a target process receives an agent
 - **THEN** the QuickJS runtime is loaded in that process and the agent runs on it
 
 ### Requirement: Process watching and bounded reinjection
@@ -106,17 +91,11 @@ schema); config semantics belong to the app and the agent.
   (a memory/DoS guard, not a schema check)
 
 ### Requirement: Opaque config delivery to agents
-The daemon SHALL deliver each agent's validated `config` verbatim, without interpreting it. For a
-`js` agent it SHALL call the agent's `rpc.exports.init(stage, parameters)` with
-`parameters.config` set to the config, implementing the `frida:rpc` protocol over `Script.post`/
-`message`. For a `native` agent it SHALL pass the config as the `data` argument of
-`inject_library_blob`.
+The daemon SHALL deliver each agent's validated `config` verbatim, without interpreting it. It
+SHALL call the agent's `rpc.exports.init(stage, parameters)` with `parameters.config` set to the
+config, implementing the `frida:rpc` protocol over `Script.post`/`message`.
 
-#### Scenario: js agent receives config via RPC init
-- **WHEN** a `js` agent is loaded
+#### Scenario: Agent receives config via RPC init
+- **WHEN** an agent is loaded
 - **THEN** the daemon calls its `rpc.exports.init` with `parameters.config`
   set to the agent's config
-
-#### Scenario: native agent receives config via data argument
-- **WHEN** a `native` agent is injected
-- **THEN** the daemon passes the agent's config as the `inject_library_blob` `data` argument

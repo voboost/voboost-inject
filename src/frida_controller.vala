@@ -7,8 +7,8 @@ public enum InjectResult {
 
 // Drives embedded frida-core in-process over the local device: no socket,
 // no per-injection exec. Spawn-gating for earliest reach + attach for
-// running targets; per-process sessions; js (QuickJS) / native routing with
-// lazy QuickJS (a process with only native agents never loads QuickJS).
+// running targets; per-process sessions; every agent runs JavaScript on
+// frida-core's QuickJS runtime (GumJS) via a per-process session script.
 // Guaranteed resume () of every gated process on success, failure, or
 // timeout. See injection-control + device-safety specs (D1, D3, D6).
 public class FridaController : Object {
@@ -88,34 +88,14 @@ public async bool open() {
         this.device = yield this.manager.get_device_by_type(
             Frida.DeviceType.LOCAL);
         this.device.process_crashed.connect((crash) => {
-                    // process_crashed is the native-only crash path: a
-                    // native target has no session, so it surfaces a crash
-                    // only here. A js target has a session and surfaces
-                    // death via session.detached (above), whose handler owns
-                    // the js session lifecycle AND is object-identity
-                    // guarded against PID reuse. When a session still exists
-                    // for this pid, leave it to detached and do nothing here
-                    // (js targets are thus fully PID-reuse-safe).
-                    //
-                    // For a NATIVE-only target (no session), this handler
-                    // clears loaded_agents[pid] and fires process_lost. That
-                    // is correct for the common case — a crashed target that
-                    // respawns is re-injected fresh (clear_pid_state on the
-                    // next spawn would also clear it; removing here is the
-                    // attach-path equivalent). It is NOT object-identity
-                    // guarded (a native crash carries only a pid, no session
-                    // to compare), so a stale crash delivered AFTER the pid
-                    // was recycled into a different native successor can
-                    // clobber the successor's loaded_agents and over-count a
-                    // death. This is a KNOWN limitation, not an oversight:
-                    // native-only targets do not exist yet in this change
-                    // (agents are js), and the injection-control spec NOTE
-                    // defers robust restart-detection for native-only targets
-                    // to the JS->native migration, which will give native
-                    // targets a per-pid generation token (the only real fix,
-                    // since there is no session object to compare here). The
-                    // over-count direction is fail-safe (biases toward
-                    // panic-quarantine = stop injecting = safe).
+                    // A target that has a session surfaces death via the
+                    // session.detached signal (above), whose handler owns the
+                    // session lifecycle and is object-identity guarded
+                    // against PID reuse. process_crashed is the fallthrough
+                    // for a crash with no surviving session: clear the
+                    // loaded-agents entry and fire process_lost so the
+                    // supervisor re-injects on respawn. When a session still
+                    // exists for this pid, leave it to detached.
                     if (this.sessions.contains(crash.pid)) {
                         return;
                     }
@@ -239,23 +219,21 @@ private async InjectResult attach_and_load(
     // change) would skip the /proc/PID/maps check on a pid the daemon has
     // NOT actually injected — contradicting device-safety "Coexistence
     // skip applies only to processes the daemon has not yet injected
-    // itself". A native-only target still gets its set on the first
-    // successful native load, so idempotent re-injection is unchanged.
+    // itself".
     var done = this.loaded_agents.lookup(pid);
 
-    // The frida Session (and thus QuickJS) is opened LAZILY: only the
-    // first js agent triggers attach. A native-only target NEVER attaches
-    // a session and NEVER loads QuickJS — native agents are injected as
-    // frida-gum .so via device.inject_library_blob. See injection-control
-    // "Per-agent runtime routing and per-process lazy runtime" (D3).
+    // The frida Session (and thus QuickJS) is opened LAZILY: only the first
+    // agent triggers attach, and the session is reused for the rest. See
+    // injection-control "Per-agent runtime routing and per-process lazy
+    // runtime" (D3).
     Frida.Session? session = this.sessions.lookup(pid);
     bool any_ok = false;
     // attach () is bounded by op_timeout_ms, so attempt it at most once per
     // attach_and_load: if it fails (process gone / refused / timed out),
-    // remember the failure and skip the remaining js agents rather than
-    // re-attaching (and re-timing-out) once per js agent — which would block
-    // the GMainLoop for N x op_timeout_ms on a multi-js-agent target whose
-    // process is unreachable. Native agents still proceed (no session).
+    // remember the failure and skip the remaining agents rather than
+    // re-attaching (and re-timing-out) once per agent — which would block
+    // the GMainLoop for N x op_timeout_ms on a multi-agent target whose
+    // process is unreachable.
     bool attach_failed = false;
     for (uint i = 0; i < agents.length; i++) {
         var agent = agents[i];
@@ -264,26 +242,19 @@ private async InjectResult attach_and_load(
             continue;
         }
         string config = config_by_id.lookup(agent.id) ?? "{}";
-        bool ok;
-        if (agent.kind == AgentKind.NATIVE) {
-            ok = yield inject_native(pid, agent, config);
-        } else {
-            if (session == null && !attach_failed) {
-                session = yield attach(pid);
-                if (session == null) {
-                    attach_failed = true;
-                }
-            }
-            // No session (attach failed or never attempted): skip this js
-            // agent but continue the loop — native agents that follow do
-            // not need a session and must not be silently dropped.
+        if (session == null && !attach_failed) {
+            session = yield attach(pid);
             if (session == null) {
-                Log.err("frida",
-                        "skip js agent %s(no session)".printf(agent.id));
-                continue;
+                attach_failed = true;
             }
-            ok = yield load_js(session, agent, config, stage);
         }
+        // No session (attach failed or never attempted): skip this agent.
+        if (session == null) {
+            Log.err("frida",
+                    "skip agent %s(no session)".printf(agent.id));
+            continue;
+        }
+        bool ok = yield load_js(session, agent, config, stage);
         if (ok) {
             if (done == null) {
                 done = new GenericArray<string> ();
@@ -382,51 +353,7 @@ private async Frida.Session? attach(uint pid) {
     }
 }
 
-// Native agent: inject a frida-gum .so directly via inject_library_blob
-// with its exported entrypoint and the opaque config JSON as the data arg.
-// No Session, no Script, no JS engine — QuickJS is never loaded for this.
-// Per-agent isolation: a failure is caught and contained. sha256 is
-// re-verified immediately before injecting (trust-verification).
-private async bool inject_native(
-    uint pid, AgentDef agent, string config) {
-    string path = Path.build_filename(this.root_zone, agent.file);
-    uint8[] data;
-    try {
-        FileUtils.get_data(path, out data);
-    } catch (Error e) {
-        Log.err("frida", "native read %s: %s".printf(
-                    agent.id, e.message));
-        return false;
-    }
-    if (Checksum.compute_for_data(ChecksumType.SHA256, data)
-        != agent.sha256.down()) {
-        Log.err("frida", "sha256 mismatch at load: " + agent.id);
-        return false;
-    }
-    var cancel = new Cancellable();
-    uint tid = Timeout.add(this.op_timeout_ms, () => {
-                cancel.cancel();
-                return Source.REMOVE;
-            });
-    try {
-        // frida-core 17.x: inject_library_blob (uint pid, Bytes blob,
-        // string entrypoint, string data, Cancellable? = null) -> uint.
-        // (Verified vs frida-core 17.11.0 src/frida.vala Device.)
-        yield this.device.inject_library_blob(
-            pid, new Bytes(data), agent.entrypoint, config, cancel);
-        disarm(ref tid, cancel);
-        Log.ok("frida", "injected native " + agent.id);
-        return true;
-    } catch (Error e) {
-        disarm(ref tid, cancel);
-        string why = cancel.is_cancelled() ? "timed out" : e.message;
-        Log.err("frida", "native %s failed: %s".printf(
-                    agent.id, why));
-        return false;
-    }
-}
-
-// js agent: create a QuickJS session script from source and load it.
+// Load an agent: create a QuickJS session script from source and load it.
 // Per-agent isolation; sha256 re-verified immediately before load. Each
 // async step is bounded by op_timeout_ms so a hung frida call cannot
 // block the GMainLoop (D6, task 6.5).

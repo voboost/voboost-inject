@@ -4,7 +4,7 @@ public string id { get; construct; }
 public bool enabled { get; construct; }
 // Opaque agent config, serialized JSON (verbatim from inject.json, or
 // "{}" if absent). The daemon never interprets it — it is forwarded to
-// the agent (js: rpc.init parameters.config; native: data arg).
+// the agent via rpc.exports.init parameters.config.
 public string config { get; construct; }
 
 public PlanEntry(string id, bool enabled, string config) {
@@ -29,8 +29,8 @@ public Plan() {
 // against the verified Manifest: id must be whitelisted and config must be
 // within the size bound. config is OPAQUE — the daemon does not inspect it
 // (no parameter schema); it is stored verbatim and forwarded to the agent.
-// process/kind/sha256/entrypoint are NEVER read from the plan. The size
-// bounds are a memory/DoS guard, not schema validation. See injection-control
+// process/sha256 are NEVER read from the plan. The size bounds are a
+// memory/DoS guard, not schema validation. See injection-control
 // "Injection plan validation" + "Opaque config delivery".
 public class PlanReader : Object {
 public Manifest manifest { get; construct; }

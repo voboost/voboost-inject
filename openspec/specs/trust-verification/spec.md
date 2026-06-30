@@ -37,11 +37,11 @@ recorded in the verified manifest. An agent whose bytes do not match SHALL NOT b
 - **WHEN** an agent file's sha256 differs from the manifest value
 - **THEN** the daemon refuses to inject it and reports the failure in status
 
-### Requirement: Manifest is the source of target process and kind
-The daemon SHALL take each agent's target `process` and `kind` (`js` or `native`) exclusively
-from the verified manifest, never from the app-written injection plan.
+### Requirement: Manifest is the source of target process
+The daemon SHALL take each agent's target `process` exclusively from the verified manifest,
+never from the app-written injection plan.
 
 #### Scenario: Plan attempts to override target
 - **WHEN** the injection plan references an agent
-- **THEN** the daemon resolves that agent's target process and kind from the
-  manifest and ignores any such fields in the plan
+- **THEN** the daemon resolves that agent's target process from the manifest
+  and ignores any such field in the plan

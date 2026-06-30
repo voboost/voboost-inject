@@ -1,34 +1,24 @@
 namespace Voboost {
-public enum AgentKind {
-    JS,
-    NATIVE;
 
-    public static AgentKind parse(string s) {
-        return s == "native" ? AgentKind.NATIVE : AgentKind.JS;
-    }
-}
-
+// An agent is always JavaScript, run on frida-core's QuickJS runtime via a
+// per-process session script. There is no native agent kind: every shipped
+// agent hooks Java methods through frida-java-bridge, which runs on QuickJS,
+// and the frida-gum native C API has no bridge to Java/ART methods.
 public class AgentDef : Object {
 public string id { get; construct; }
 public string channel { get; construct; }
 public string file { get; construct; }
 public string sha256 { get; construct; }
 public string process { get; construct; }
-public AgentKind kind { get; construct; }
-// Exported init symbol for a native (.so) agent, passed to
-// inject_library_blob; empty and ignored for js agents.
-public string entrypoint { get; construct; }
 // Per-agent boot gate. When true, defer injection until
 // sys.boot_completed=1; default false = inject as soon as the target is
 // reachable (earliest). See daemon-lifecycle "Per-agent boot-readiness".
 public bool requires_boot { get; construct; }
 
 public AgentDef(string id, string channel, string file, string sha256,
-                string process, AgentKind kind, string entrypoint,
-                bool requires_boot) {
+                string process, bool requires_boot) {
     Object(id: id, channel: channel, file: file, sha256: sha256,
-           process: process, kind: kind, entrypoint: entrypoint,
-           requires_boot: requires_boot);
+           process: process, requires_boot: requires_boot);
 }
 }
 
@@ -120,9 +110,6 @@ private bool parse(string json) {
                             safe_string(a, "file"),
                             safe_string(a, "sha256"),
                             safe_string(a, "process"),
-                            AgentKind.parse(
-                                safe_string(a, "kind", "js")),
-                            safe_string(a, "entrypoint", ""),
                             safe_bool(a, "boot", false)));
     }
     return true;
