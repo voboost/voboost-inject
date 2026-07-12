@@ -1,0 +1,64 @@
+diff --git a/gum/backend-posix/gummemory-posix.c b/gum/backend-posix/gummemory-posix.c
+index 848b430..85e6c89 100644
+--- a/gum/backend-posix/gummemory-posix.c
++++ b/gum/backend-posix/gummemory-posix.c
+@@ -143,6 +143,16 @@ gum_memory_allocate_internal (gpointer address,
+   allocation_size = size + (alignment - page_size);
+   allocation_size = GUM_ALIGN_SIZE (allocation_size, page_size);
+ 
++  /* Android emulator (QEMU) returns EINVAL for mmap with length=0,
++   * while real devices tolerate it (undefined behavior per POSIX).
++   * A zero-sized allocation is never useful; round up to one page so
++   * the call is well-defined and the caller's g_assert(result != NULL)
++   * in gum_alloc_n_pages holds. This unblocks frida-gum's embedded
++   * local backend on emulators without affecting production devices.
++   */
++  if (allocation_size == 0)
++    allocation_size = page_size;
++
+   base = gum_allocate_page_aligned (address, allocation_size,
+       _gum_page_protection_to_posix (prot), extra_flags);
+   if (base == NULL)
+@@ -274,6 +284,16 @@ gum_allocate_page_aligned (gpointer address,
+   const gint base_flags = MAP_PRIVATE | MAP_ANONYMOUS | extra_flags;
+   gint region_flags = 0;
+ 
++  /* Android emulator (QEMU) returns EINVAL for mmap with length=0,
++   * while real devices tolerate it (undefined behavior per POSIX).
++   * A zero-sized allocation is never useful; round up to one page so
++   * the call is well-defined and the caller's g_assert(result != NULL)
++   * in gum_alloc_n_pages holds. This unblocks frida-gum's embedded
++   * local backend on emulators without affecting production devices.
++   */
++  if (size == 0)
++    size = gum_query_page_size ();
++
+ #if defined (HAVE_FREEBSD) && GLIB_SIZEOF_VOID_P == 8
+   if (address != NULL &&
+       GPOINTER_TO_SIZE (address) + size < G_MAXUINT32)
+diff --git a/gum/gummemory.c b/gum/gummemory.c
+index f2214ac..b76280d 100644
+--- a/gum/gummemory.c
++++ b/gum/gummemory.c
+@@ -314,6 +314,21 @@ gum_query_ptrauth_support (void)
+ guint
+ gum_query_page_size (void)
+ {
++  /* voboost-inject: the embedded local backend can reach this before
++   * gum_internal_heap_ref () has run at all (e.g. the Zymbiote /
++   * gum_linker_api_try_init -> gum_elf_module_load path). If we only lazily
++   * set gum_cached_page_size here, page_size becomes correct but the rest of
++   * the heap (cloak's GumMetalArrays, the dlmalloc mspaces) stays
++   * uninitialized: gum_cloak_add_range -> gum_metal_array_append then
++   * derefs a NULL data pointer and the daemon SIGSEGVs. So perform the FULL
++   * gum_internal_heap_ref () on first reach: it is ref-counted and idempotent,
++   * sets gum_cached_page_size BEFORE _gum_cloak_init () (so the recursive
++   * query inside gum_metal_array_init returns at once — no recursion into
++   * heap_ref), and initializes cloak + mspaces. No-op once initialized:
++   * production devices and frida-server call heap_ref normally first. */
++  if (gum_cached_page_size == 0)
++    gum_internal_heap_ref ();
++
+   return gum_cached_page_size;
+ }
+ 

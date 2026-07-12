@@ -1,0 +1,19 @@
+diff --git a/lib/agent/meson.build b/lib/agent/meson.build
+index 003ee13..0c732a7 100644
+--- a/lib/agent/meson.build
++++ b/lib/agent/meson.build
+@@ -59,6 +59,14 @@ if build_agent
+       # hidden and fail with "undefined hidden symbol: realloc". -u forces them
+       # to be treated as undefined imports that resolve to bionic's libc.so.
+       extra_link_args += ['-Wl,-u,malloc', '-Wl,-u,calloc', '-Wl,-u,realloc', '-Wl,-u,free']
++      # voboost-inject: force the SysV .hash table (DT_HASH), not the default
++      # DT_GNU_HASH. tools/post-process.py runs termux-elf-cleaner, which
++      # strips .gnu.hash for old-Android compat but leaves .hash; with the
++      # NDK default (gnu only) the cleaned .so ends up hashless and the API 28
++      # Bionic linker rejects it at dlopen: "empty/missing DT_HASH/DT_GNU_HASH
++      # (new hash type from the future?)". sysv keeps a .hash the cleaner
++      # preserves, so older linkers can still resolve symbols.
++      extra_link_args += '-Wl,--hash-style=sysv'
+     endif
+   endif
+ 

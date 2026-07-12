@@ -135,7 +135,8 @@ public void start() {
         SAFETY_PANIC_WINDOW_SEC);
     var frida = new FridaController(ROOT_ZONE, safety);
     var watcher = new ProcessWatcher(frida, safety);
-    var app_watcher = new AppZoneWatcher(APP_ZONE);
+    var app_watcher = new AppZoneWatcher(
+        APP_ZONE, Path.build_filename(ROOT_ZONE, "run"));
     var status = new Status(
         Path.build_filename(APP_ZONE, "inject-status.json"));
     var ota = new Ota(ROOT_ZONE, trust);
@@ -183,6 +184,11 @@ private void release_lock() {
 
 public static int main(string[] args) {
     Log.init(Path.build_filename(Daemon.ROOT_ZONE, "logs"));
+    // Initialize frida-core (+ gum_init) once, before any frida object is
+    // constructed: without it the embedded local backend reaches gum subsystems
+    // (cloak's GumMetalArray, the page-size cache) before gum_internal_heap_ref
+    // has run, so cloak->ranges.data is NULL and gum_cloak_add_range SIGSEGVs.
+    Frida.init();
     var loop = new MainLoop();
     var daemon = new Daemon(loop);
 
