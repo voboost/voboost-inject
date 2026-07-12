@@ -22,8 +22,8 @@ voboost-inject is one component of a multi-repo system:
   (`ru.voboost`); ships the agents in its APK and writes `inject.json`.
 - **`voboost-inject`** *(this repo)* — the root daemon; verifies and injects
   signed agents.
-- [`voboost-agent`](https://github.com/voboost/voboost-agent) — the Frida agents
-  (js/native) and the **signed agent-set manifest** they ship in.
+- [`voboost-agent`](https://github.com/voboost/voboost-agent) — the Frida
+  JavaScript agents and the **signed agent-set manifest** they ship in.
 - [`voboost-install`](https://github.com/voboost/voboost-install) — device
   bring-up: first install of the daemon binary, agents, and the `/system` init
   hook.
@@ -110,9 +110,9 @@ All three files are specified in `openspec/specs/app-interface`.
 
   `"startup": "none"` makes the daemon exit without injecting; any other
   value (or a missing field) lets it run. The daemon resolves each agent's
-  target `process` and `kind` (`js` or `native`) from the **verified
-  manifest**, never from this plan; `config` is opaque bytes, size-bounded
-  only (64 KiB per agent, 1 MiB for the whole file).
+  target `process` from the **verified manifest**, never from this plan;
+  `config` is opaque bytes, size-bounded only (64 KiB per agent, 1 MiB for
+  the whole file).
 
 - **`inject-status.json`** *(daemon → app, app zone)* — the daemon's outbound
   status, written atomically (temp + rename, never following a symlink):
@@ -173,20 +173,12 @@ On boot the daemon:
 
 ```
 GATE (spawn-gated) or ATTACH (already running)
-  -> INJECT (js via QuickJS script, native via library injection)
+  -> INJECT (JavaScript via a per-process QuickJS session script)
   -> MONITOR (watch for death, reinject within safety budget)
 ```
 
-- **js agents** run on frida-core's QuickJS runtime via `create_script`.
-- **native agents** are injected as compiled `.so` files via
-  `inject_library_blob` — no JavaScript engine loaded.
-- QuickJS is loaded per-process only when at least one `js` agent targets that
-  process; a process receiving only `native` agents never loads QuickJS.
-- **Native-only restart detection is deferred.** A target receiving *only*
-  `native` agents has no frida session (no JS engine), so the robust death /
-  restart path for such targets is not wired yet — it lands with the future
-  JS->native migration. Targets carrying at least one `js` agent are
-  unaffected.
+- Every agent runs JavaScript on frida-core's QuickJS runtime via
+  `create_script`, on a per-process session script.
 - An agent with `boot: true` in the manifest is deferred until
   `sys.boot_completed=1`; other agents inject immediately.
 
@@ -271,13 +263,10 @@ recognizable from the daemon's side. The tooling to assemble the manifest and
 sign it with the matching private key is part of
 [`voboost-agent`](https://github.com/voboost/voboost-agent).
 
-An agent is `js` (JavaScript on QuickJS) or `native` (a compiled `frida-gum`
-`.so`, no JS engine) — see *Per-target lifecycle* above. Either way it is
-verified by manifest signature + sha256 and receives the same opaque `config`.
-**Every shipped agent today is `js`** (see
-[`voboost-agent`](https://github.com/voboost/voboost-agent)); `native` is a
-supported path the daemon implements end-to-end (`inject_library_blob`), kept
-available but not yet exercised — no native agent is in the set yet.
+An agent is JavaScript that runs on frida-core's QuickJS runtime — see
+*Per-target lifecycle* above. It is verified by manifest signature + sha256
+and receives the same opaque `config`. Every shipped agent is JavaScript (see
+[`voboost-agent`](https://github.com/voboost/voboost-agent)).
 
 The agent-set manifest (`manifest.json`, signed into `manifest.sig` and shipped
 inside the app's APK) is an object with a `version`, an optional `daemon`, and
@@ -294,8 +283,6 @@ an `agents` array:
       "file": "agents/wm-viewport.js",
       "sha256": "86e413ce702abb872718569c06a2e01c52553ad35953c6df122e007d3146a87a",
       "process": "system_server",
-      "kind": "js",
-      "entrypoint": "",
       "boot": false
     }
   ]
@@ -303,14 +290,12 @@ an `agents` array:
 ```
 
 `version` is the manifest version reported back as `"manifest"` in
-`inject-status.json`; `kind` is `js` or `native`; `entrypoint` names the
-exported symbol of a native `.so` (empty and ignored for `js`); `boot: true`
-defers the agent until the device finishes booting. The manifest is signed with
-the private key matching the daemon's embedded public key; the daemon verifies
-the signature, then each agent's sha256 against it (see
-`openspec/specs/trust-verification`).
+`inject-status.json`; `boot: true` defers the agent until the device finishes
+booting. The manifest is signed with the private key matching the daemon's
+embedded public key; the daemon verifies the signature, then each agent's
+sha256 against it (see `openspec/specs/trust-verification`).
 
-### js agent (QuickJS)
+### Agent (QuickJS)
 
 ```js
 // agents/wm-viewport.js — runs on the embedded QuickJS engine.
@@ -326,49 +311,9 @@ rpc.exports = {
 };
 ```
 
-### native agent (no JS engine)
-
-```c
-/* agents/wm-viewport.c — build to a .so with the Android NDK. No JavaScript
-   engine is loaded. The manifest "entrypoint" names this exported symbol; the
-   daemon passes the agent's config JSON as the null-terminated `data` string. */
-void
-wm_viewport_entry (const char * data, int * unload_policy, void * injector_state)
-{
-  (void) data;             /* the agent's config from inject.json (JSON text) */
-  (void) injector_state;
-
-  *unload_policy = 1;      /* FRIDA_UNLOAD_POLICY_RESIDENT — stay resident */
-
-  /* ...install frida-gum hooks (Interceptor, etc.) here... */
-}
-```
-
-### Building a native agent
-
-A native agent is a C source compiled to a position-independent `.so` and linked
-against `frida-gum` (the same engine pinned in `subprojects/`).
-[`voboost-agent`](https://github.com/voboost/voboost-agent) ships only `js`
-agents today; the build below is how a `native` `.so` would be
-produced when one is added. Cross-compile for arm64-v8a with the NDK; the
-exported symbol in the source is the manifest `entrypoint`:
-
-```sh
-CC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android28-clang
-$CC -shared -fPIC -O2 -std=c11 \
-    -I"$GUM" \
-    -o agents/wm-viewport.so agents/wm-viewport.c \
-    "$GUM/build/libfrida-gum-1.0.a" -lm -ldl -lpthread
-```
-
-`GUM` is a built `frida-gum` tree (`gum.h` under its root, the static library in
-its build directory). The exact library name/path follows your frida-gum build;
-alternatively build the agent as a meson `shared_library` depending on the
-`frida-gum` subproject — the same way frida-gum's own test agents are built.
-
 ### Agent ↔ daemon messaging
 
-The daemon talks to a `js` agent over frida's `frida:rpc` protocol on top of
+The daemon talks to an agent over frida's `frida:rpc` protocol on top of
 `Script.post`/`message`:
 
 - **daemon → agent:** on load the daemon calls `rpc.exports.init(stage,
@@ -575,7 +520,7 @@ root-only) and retains logs for **7 days**. Each line follows the shared format
 
 ```
 2026-06-26 07:52:13.042 [*] main: SIGTERM: clean shutdown
-2026-06-26 07:52:14.101 [+] frida: injected native wm-viewport
+2026-06-26 07:52:14.101 [+] frida: injected wm-viewport
 ```
 
 The log stays in the root zone — the app cannot read it, and the daemon never
@@ -668,7 +613,7 @@ frida-core, frida-gum, all pinned to tag `17.11.0`), fetched and cached on
 | `main.vala` | Entry point: single-instance lock, startup gate, GMainLoop, SIGTERM |
 | `supervisor.vala` | State machine (INIT→VERIFY_SELF→READY/DEGRADED), injection orchestration |
 | `frida_controller.vala` | In-process frida-core driving: spawn-gating, attach, inject, resume |
-| `manifest.vala` | Verified manifest parser (ed25519 sig + JSON; agent id/process/kind) |
+| `manifest.vala` | Verified manifest parser (ed25519 sig + JSON; agent id/process) |
 | `plan_reader.vala` | Untrusted `inject.json` parser, validated against the manifest |
 | `trust_store.vala` | Ed25519 signature verify (Monocypher), sha256 agent verify |
 | `safety.vala` | Rate-limit, quarantine, panic-quarantine, coexistence skip, kill-switch |

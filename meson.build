@@ -1,7 +1,7 @@
 project(
   'voboost-inject',
   'vala', 'c',
-  version: '1.0.0-beta1',
+  version: '1.0.0-beta3',
   meson_version: '>= 1.1.0',
   # Release-only build: static link, LTO (build-and-signing spec, D10).
   # Strip is applied at install time via `meson install --strip`.
