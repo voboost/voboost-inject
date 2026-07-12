@@ -76,7 +76,8 @@ void test_oversized_config_rejected() {
 }
 
 // Duplicate agent ids in the plan must be rejected; only the first
-// occurrence is kept (prevents double safety-budget consumption).
+// occurrence is kept (prevents double safety-budget consumption). The
+// rejected duplicate is surfaced in plan.rejected_ids (Bug 2).
 void test_duplicate_id_rejected() {
     var reader = new PlanReader(verified_manifest());
     string json = "{\"agents\":[" +
@@ -84,6 +85,34 @@ void test_duplicate_id_rejected() {
                   "{\"id\":\"wm-viewport\",\"enabled\":true}]}";
     var plan = reader.validate(json);
     assert(plan.entries.length == 1);
+    assert(plan.rejected_ids.length == 1);
+    assert(plan.rejected_ids[0] == "wm-viewport");
+}
+
+// An unknown agent id is rejected and surfaced in rejected_ids (Bug 2).
+void test_unknown_id_surfaced_in_rejected() {
+    var reader = new PlanReader(verified_manifest());
+    string json = "{\"agents\":[" +
+                  "{\"id\":\"nope\",\"enabled\":true}]}";
+    var plan = reader.validate(json);
+    assert(plan.entries.length == 0);
+    assert(plan.rejected_ids.length == 1);
+    assert(plan.rejected_ids[0] == "nope");
+}
+
+// An oversized config is rejected and surfaced in rejected_ids (Bug 2).
+void test_oversized_config_surfaced_in_rejected() {
+    var reader = new PlanReader(verified_manifest());
+    var big = new StringBuilder();
+    for (int i = 0; i < PlanReader.MAX_CONFIG_BYTES + 100; i++) {
+        big.append_c('x');
+    }
+    string json = "{\"agents\":[{\"id\":\"wm-viewport\",\"enabled\":true," +
+                  "\"config\":{\"blob\":\"" + big.str + "\"}}]}";
+    var plan = reader.validate(json);
+    assert(plan.entries.length == 0);
+    assert(plan.rejected_ids.length == 1);
+    assert(plan.rejected_ids[0] == "wm-viewport");
 }
 
 // Whole-file cap: inject.json exceeding MAX_PLAN_BYTES is rejected
@@ -140,6 +169,10 @@ public static int main(string[] args) {
     Test.add_func("/plan/startup", test_startup_field_parsed);
     Test.add_func("/plan/oversized-config", test_oversized_config_rejected);
     Test.add_func("/plan/duplicate-id", test_duplicate_id_rejected);
+    Test.add_func("/plan/unknown-id-surfaced",
+                  test_unknown_id_surfaced_in_rejected);
+    Test.add_func("/plan/oversized-config-surfaced",
+                  test_oversized_config_surfaced_in_rejected);
     Test.add_func("/plan/oversized-plan", test_oversized_plan_rejected);
     Test.add_func("/plan/wrong-types", test_wrong_field_types_use_defaults);
     return Test.run();

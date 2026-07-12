@@ -21,27 +21,46 @@ priv="$root/config/key-dev-private.pem"
 mkdir -p "$here/agents"
 
 # --- daemon manifest + agent payload -------------------------------------
+#
+# The fixture manifest declares every agent id the app may request in a plan
+# (inject.json), so the daemon never logs "rejected unknown agent id" during
+# emulator E2E. The app's FeatureFrida set requests: wm-viewport
+# (system_server), settings-menu (com.qinggan.app.vehiclesetting),
+# low-speed-sound (com.qinggan.app.vehiclesetting, used by the config-delivery
+# scenario), and launcher-echo (com.qinggan.app.launcher, used by the
+# attach-launcher scenario). Each agent payload is a minimal stub (sends an ok
+# marker); the daemon verifies sha256 against the manifest, so the file content
+# is hashed and committed alongside the manifest.
 
-agent="$here/agents/wm-viewport.js"
-printf '%s\n' "send({ ok: true });" > "$agent"
-sha=$(openssl dgst -sha256 -hex "$agent" | awk '{ print $NF }')
-
-cat > "$here/manifest.json" <<JSON
-{
-  "version": 1,
-  "daemon": "1.0.0-beta1",
-  "agents": [
-    {
-      "id": "wm-viewport",
-      "channel": "agents",
-      "file": "agents/wm-viewport.js",
-      "sha256": "$sha",
-      "process": "system_server",
-      "boot": false
-    }
-  ]
+emit_agent() {  # emit_agent <id> <file-basename> <process> <payload-line>
+  local id="$1" base="$2" proc="$3" payload="$4"
+  local file="$here/agents/${base}"
+  printf '%s\n' "$payload" > "$file"
+  local sha; sha=$(openssl dgst -sha256 -hex "$file" | awk '{ print $NF }')
+  printf '    {\n      "id": "%s",\n      "channel": "agents",\n' "$id"
+  printf '      "file": "agents/%s",\n' "$base"
+  printf '      "sha256": "%s",\n' "$sha"
+  printf '      "process": "%s",\n      "boot": false\n    }' "$proc"
 }
-JSON
+
+{
+  printf '{\n  "version": 1,\n  "daemon": "1.0.0-beta1",\n  "agents": [\n'
+  # Each fixture agent must export rpc.exports.init so the daemon's
+  # frida:rpc "init" call (frida_controller.rpc_init_message) resolves
+  # instead of failing with "unable to find method 'init'". The init
+  # handler returns {ok: true} (the RPC reply) and also send()s a marker
+  # message so the integration test can observe the agent loaded. The
+  # real production agents (voboost-script/agents) get this via the
+  # runAgent() helper in lib/utils.js; these minimal stubs inline it.
+  emit_agent "wm-viewport"     "wm-viewport.js"     "system_server"                  "rpc.exports = { init: function() { send({ ok: true, agent: 'wm-viewport' }); return { ok: true }; } };"
+  printf ',\n'
+  emit_agent "settings-menu"    "settings-menu.js"   "com.qinggan.app.vehiclesetting" "rpc.exports = { init: function() { send({ ok: true, agent: 'settings-menu' }); return { ok: true }; } };"
+  printf ',\n'
+  emit_agent "low-speed-sound"  "low-speed-sound.js" "com.qinggan.app.vehiclesetting" "rpc.exports = { init: function() { send({ ok: true, agent: 'low-speed-sound' }); return { ok: true }; } };"
+  printf ',\n'
+  emit_agent "launcher-echo"    "launcher-echo.js"   "com.qinggan.app.launcher"        "rpc.exports = { init: function() { send({ ok: true, agent: 'launcher-echo' }); return { ok: true }; } };"
+  printf '\n  ]\n}\n'
+} > "$here/manifest.json"
 
 openssl pkeyutl -sign -inkey "$priv" -rawin \
   -in "$here/manifest.json" -out "$here/manifest.sig"
