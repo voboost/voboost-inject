@@ -98,14 +98,62 @@ jobs:
       - name: Strip device binary
         run: llvm-strip build-android/voboost-inject
 
+      # Build the daemon's per-agent manifest (manifest.json) and sign it with
+      # the release key (same ed25519 key family as EMBEDDED_PUBKEY, design D7).
+      # This manifest is embedded inside the core APK at assets/manifest.json
+      # and re-verified by the daemon at apply time against EMBEDDED_PUBKEY
+      # (design D1). The daemon version is read from meson.build; the agents
+      # list is empty for now (agents ride inside the APK and are applied at
+      # VERIFY_SELF from this embedded manifest — none shipped yet).
+      - name: Build and sign daemon manifest
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: |
+          test -n "$SIGNING_KEY" || {
+            echo "release: SIGNING_KEY secret is empty; set it before tagging a release" >&2
+            exit 1
+          }
+          version=$(meson introspect build --projectinfo \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+          mkdir -p build
+          cat > build/manifest.json <<JSON
+          {
+            "version": 1,
+            "daemon": "$version",
+            "agents": []
+          }
+          JSON
+          umask 077
+          keyfile=$(mktemp)
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s' "$SIGNING_KEY" > "$keyfile"
+          make sign KEY="$keyfile" FILE=build/manifest.json
+          make verify-sig KEY=config/release-public.pem FILE=build/manifest.json
+          rm -f "$keyfile"
+
+      # Build the daemon core APK (ota-core-selfupdate contract): a ZIP named
+      # voboost-inject.apk packaging assets/manifest.json, assets/manifest.sig,
+      # and assets/voboost-inject (the stripped daemon ELF). The daemon's
+      # apply_core_apk_update() re-verifies the embedded manifest and extracts
+      # the binary from this ZIP (design D1/D5). Staging the raw ELF (as the
+      # previous workflow did) broke the contract: the daemon rejected it with
+      # "staged APK missing embedded manifest entry".
+      - name: Build core APK
+        run: |
+          make core-apk \
+            BINARY=build-android/voboost-inject \
+            MANIFEST=build/manifest.json \
+            MANIFEST_SIG=build/manifest.json.sig \
+            OUT=build/voboost-inject.apk
+
       # Stage only the intended release artifact(s) into a clean directory so
       # the manifest generator (ota) scans release files, not meson build noise
       # (build.ninja, meson-info/, object files, subproject artefacts). The
-      # device binary is the core channel.
+      # core APK (not the raw binary) is the core channel.
       - name: Stage release artifacts
         run: |
           mkdir -p dist
-          cp build-android/voboost-inject dist/
+          cp build/voboost-inject.apk dist/
 
       # Generate the OTA release manifest (owned by the ota change) from the
       # clean staging dir; ci signs and publishes it below. The version was
@@ -140,14 +188,17 @@ jobs:
           make verify-sig KEY=config/release-public.pem FILE=build/release-manifest.json
           rm -f "$keyfile"
 
-      # Publish the signed device binary and the signed OTA release manifest
-      # (with its .sig). The manifest's channel field groups files logically.
+      # Publish the signed core APK (the daemon APK with its embedded manifest)
+      # and the signed OTA release manifest (with its .sig). The core APK is the
+      # atomic update unit the OTA client downloads and stages; the release
+      # manifest is its trust source (size+sha256). The raw device binary is not
+      # published — it rides inside the core APK at assets/voboost-inject.
       - name: Publish signed artifacts
         uses: actions/upload-artifact@v4
         with:
           name: voboost-inject-${{ github.ref_name }}
           path: |
-            build-android/voboost-inject
+            build/voboost-inject.apk
             build/release-manifest.json
             build/release-manifest.json.sig
           if-no-files-found: error

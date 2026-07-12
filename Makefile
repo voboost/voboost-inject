@@ -137,8 +137,11 @@ lint-fix:
 	uncrustify --replace --no-backup -c config/config-uncrustify.cfg -l VALA \
 		$$(find src test -name '*.vala' 2>/dev/null)
 
+# Run tests via frida's meson, matching setup/build-android: the build dir's
+# coredata.dat was written by frida-meson, so the system meson (a different
+# version) fails to pickle-load it (ModuleNotFoundError: mesonbuild.options).
 test:
-	meson test -C $(BUILD_DIR)
+	$(PYTHON_FOR_MESON) $(FRIDA_MESON) test -C $(BUILD_DIR)
 
 check:
 	@missing=0; \
@@ -209,6 +212,43 @@ sign:
 	openssl pkeyutl -sign -inkey "$(KEY)" -rawin -in "$(FILE)" -out "$(FILE).sig"
 	@echo "Signed $(FILE) -> $(FILE).sig"
 
+.PHONY: core-apk
+
+# Build the daemon core APK (ota-core-selfupdate contract). Packages the
+# stripped daemon binary + the signed per-agent manifest into a ZIP named
+# voboost-inject.apk with the fixed asset entries the daemon's ZIP reader
+# expects: assets/manifest.json, assets/manifest.sig, assets/voboost-inject
+# (design D1/D5). The daemon re-verifies the embedded manifest against
+# EMBEDDED_PUBKEY at apply time; the APK's own Android signature is NOT
+# verified by the daemon (D1).
+#
+# Inputs (passed by the caller, typically release.yml):
+#   BINARY=<path to the stripped daemon ELF>      (required)
+#   MANIFEST=<path to the daemon manifest.json>   (required)
+#   MANIFEST_SIG=<path to manifest.json.sig>      (required)
+#   OUT=<output apk path>                        (default: build/voboost-inject.apk)
+#
+# Python zipfile is stdlib and produces a well-formed ZIP the daemon's minimal
+# reader can parse (mirrors test/fixtures/gen-fixtures.sh). Entries are stored
+# uncompressed (method 0) so the reader's stored path is exercised; the daemon
+# also supports deflated entries (method 8) via its streaming inflater.
+core-apk:
+	@test -n "$(BINARY)"       || { echo "core-apk: BINARY=<daemon-elf> required"          >&2; exit 2; }
+	@test -n "$(MANIFEST)"     || { echo "core-apk: MANIFEST=<manifest.json> required"     >&2; exit 2; }
+	@test -n "$(MANIFEST_SIG)" || { echo "core-apk: MANIFEST_SIG=<manifest.json.sig> required" >&2; exit 2; }
+	@test -f "$(BINARY)"       || { echo "core-apk: BINARY $(BINARY) not found"             >&2; exit 2; }
+	@test -f "$(MANIFEST)"     || { echo "core-apk: MANIFEST $(MANIFEST) not found"         >&2; exit 2; }
+	@test -f "$(MANIFEST_SIG)" || { echo "core-apk: MANIFEST_SIG $(MANIFEST_SIG) not found" >&2; exit 2; }
+	@out="$(OUT)"; [ -n "$$out" ] || out=build/voboost-inject.apk; \
+	mkdir -p "$$(dirname "$$out")"; \
+	python3 -c 'import sys, zipfile; out,binary,manifest,sig=sys.argv[1:5]; \
+z=zipfile.ZipFile(out,"w",zipfile.ZIP_STORED); \
+z.write(manifest,"assets/manifest.json"); \
+z.write(sig,"assets/manifest.sig"); \
+z.write(binary,"assets/voboost-inject"); z.close(); \
+print("Wrote "+out)' "$$out" "$(BINARY)" "$(MANIFEST)" "$(MANIFEST_SIG)"
+	@echo "Core APK built"
+
 verify-sig:
 	@test -n "$(KEY)"  || { echo "verify-sig: KEY=<public.pem> required" >&2; exit 2; }
 	@test -n "$(FILE)" || { echo "verify-sig: FILE=<manifest> required"  >&2; exit 2; }
@@ -277,3 +317,117 @@ device-rearm:
 	  printf '%s\n' "$$end" >> "$(HOOK)"; \
 	  echo "device-rearm: armed $(HOOK)"; \
 	fi
+
+.PHONY: emulator-run
+
+# Android emulator dev deploy (no -writable-system, no /system init hook).
+# On this host -writable-system does not cold-boot, and adb remount cannot make
+# /system writable (remount of the / superblock failed: Permission denied), so
+# the daemon is started from the host instead of by a /system init hook. This
+# reproduces the production start timing exactly: the production hook
+# (voboost-install INIT_HOOK_BODY) runs the service on property:sys.boot_completed=1
+# (service disabled+oneshot), so a host-driven start is not later than production.
+# Provisions /data/voboost from test/fixtures (root:root 700), pushes the
+# cross-built daemon + signed manifest + agents, then starts the daemon under
+# `su 0` (single-instance enforced by the daemon's pidfile + flock).
+#   ADB=<adb>            adb binary (default: adb on PATH)
+#   EMU_SERIAL=<serial>  emulator serial (default: emulator-5554)
+ADB ?= adb
+EMU_SERIAL ?= emulator-5554
+EMU_ZONE ?= /data/voboost
+EMU_APP_ZONE ?= /data/user/0/ru.voboost
+EMU_BIN ?= $(ANDROID_BUILD_DIR)/src/voboost-inject
+
+# voboost app + stubs APKs (sibling repos). Used by emulator-run to install
+# the app (which creates /data/data/ru.voboost with the correct UID) and the
+# stub target packages the agents inject into.
+VOBOOST_APK ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost/build/outputs/apk/release/voboost.apk
+STUBS_DIR ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost-stubs
+
+# voboost-install binary + OTA release public key (sibling repo). emulator-run
+# drives the real provision scenario (config-provision.json) through
+# `voboost-install --install` instead of raw adb commands, so the emulator
+# exercises the same provision path as production. The installer handles
+# daemon/agents/manifest push, app install, init hook (skipped on emulator via
+# fatal=false on remount + write-init-hook), and daemon start. Build it with:
+#   cd ../voboost-install/src-tauri && cargo build --release
+VOBOOST_INSTALL_BIN ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost-install/src-tauri/target/release/voboost-install
+VOBOOST_RELEASE_KEY ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost-install/config/release-public.pem
+VOBOOST_MANIFEST ?= test/fixtures/manifest.json
+VOBOOST_MANIFEST_SIG ?= test/fixtures/manifest.sig
+VOBOOST_AGENTS_DIR ?= test/fixtures/agents
+
+emulator-run:
+	@test -f "$(EMU_BIN)" || { echo "emulator-run: $(EMU_BIN) missing (run: make build-android)" >&2; exit 2; }
+	@a="$(ADB) -s $(EMU_SERIAL)"; \
+	echo "emulator-run: waiting for device $(EMU_SERIAL)"; \
+	$$a wait-for-device || exit 1; \
+	$$a root >/dev/null 2>&1 || true; \
+	$$a wait-for-device || exit 1; \
+	echo "emulator-run: waiting for sys.boot_completed=1"; \
+	i=0; while [ "$$($$a shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; do \
+	  i=$$((i+1)); [ $$i -ge 120 ] && { echo "emulator-run: boot_completed timeout" >&2; exit 1; }; \
+	  sleep 1; \
+	done; \
+	echo "emulator-run: provisioning via voboost-install --install"; \
+	test -x "$(VOBOOST_INSTALL_BIN)" \
+	  || { echo "emulator-run: $(VOBOOST_INSTALL_BIN) missing (build: cd ../voboost-install/src-tauri && cargo build --release)" >&2; exit 2; }; \
+	test -f "$(VOBOOST_APK)" || { echo "emulator-run: $(VOBOOST_APK) missing" >&2; exit 2; }; \
+	ANDROID_SERIAL="$(EMU_SERIAL)" "$(VOBOOST_INSTALL_BIN)" --install "$(VOBOOST_APK)" \
+	  --daemon-bin "$(EMU_BIN)" \
+	  --agents-dir "$(VOBOOST_AGENTS_DIR)" \
+	  --manifest "$(VOBOOST_MANIFEST)" \
+	  --manifest-sig "$(VOBOOST_MANIFEST_SIG)" \
+	  --release-key "$(VOBOOST_RELEASE_KEY)" \
+	  --lang en \
+	  || { echo "emulator-run: voboost-install --install failed (see $(EMU_ZONE)/logs/manual-start.log)" >&2; exit 1; }; \
+	pid=$$($$a shell "su 0 pgrep -f $(EMU_ZONE)/voboost-inject" 2>/dev/null | tr -d '\r'); \
+	test -n "$$pid" || { echo "emulator-run: daemon not running (see $(EMU_ZONE)/logs/manual-start.log)" >&2; exit 1; }; \
+	echo "emulator-run: daemon PID=$$pid"; \
+	echo "emulator-run: installing stubs"; \
+	for stub in $(STUBS_DIR)/*/build/outputs/apk/release/*.apk; do \
+	  [ -f "$$stub" ] || continue; \
+	  pkg=$$(basename "$$stub" .apk); \
+	  case "$$pkg" in \
+	    launcher) apkid=com.qinggan.app.launcher ;; \
+	    bluetoothphone) apkid=com.qinggan.bluetoothphone ;; \
+	    qgime) apkid=com.qinggan.app.qgime ;; \
+	    systemservice) apkid=com.qinggan.systemservice ;; \
+	    vehiclesetting) apkid=com.qinggan.app.vehiclesetting ;; \
+	    *) continue ;; \
+	  esac; \
+	  if $$a shell pm list packages "$$apkid" 2>/dev/null | grep -q "^package:$$apkid$$"; then \
+	    echo "emulator-run: $$apkid already installed"; \
+	  else \
+	    $$a install -r "$$stub" >/dev/null 2>&1 \
+	      || { echo "emulator-run: $$stub install failed" >&2; exit 1; }; \
+	    echo "emulator-run: installed $$apkid"; \
+	  fi; \
+	done; \
+	echo "emulator-run: app zone created by provision (app-zone step)"; \
+	echo "emulator-run: writing test inject.json (4 agents)"; \
+	appuid=$$($$a shell "su 0 stat -c %u /data/data/ru.voboost" 2>/dev/null | tr -d '\r'); \
+	appgid=$$($$a shell "su 0 stat -c %g /data/data/ru.voboost" 2>/dev/null | tr -d '\r'); \
+	tmpjson=$$(mktemp -t voboost-inject.XXXXXX) || exit 1; \
+	printf '%s\n' \
+	  '{' \
+	  '  "version": 1,' \
+	  '  "startup": "boot",' \
+	  '  "log_level": "info",' \
+	  '  "agents": [' \
+	  '    {"id":"wm-viewport","enabled":true},' \
+	  '    {"id":"settings-menu","enabled":true},' \
+	  '    {"id":"low-speed-sound","enabled":true},' \
+	  '    {"id":"launcher-echo","enabled":true}' \
+	  '  ]' \
+	  '}' > "$$tmpjson"; \
+	$$a push "$$tmpjson" /data/local/tmp/voboost-inject.json >/dev/null \
+	  || { rm -f "$$tmpjson"; exit 1; }; \
+	rm -f "$$tmpjson"; \
+	$$a shell "su 0 cp /data/local/tmp/voboost-inject.json $(EMU_APP_ZONE)/inject.json" \
+	  || exit 1; \
+	$$a shell "su 0 chown $$appuid:$$appgid $(EMU_APP_ZONE)/inject.json" 2>/dev/null || true; \
+	$$a shell "su 0 chmod 600 $(EMU_APP_ZONE)/inject.json" 2>/dev/null || true; \
+	$$a shell "su 0 rm -f /data/local/tmp/voboost-inject.json" 2>/dev/null || true; \
+	echo "emulator-run: app zone ready"; \
+	$$a shell "su 0 cat $(EMU_APP_ZONE)/inject-status.json" 2>/dev/null || true

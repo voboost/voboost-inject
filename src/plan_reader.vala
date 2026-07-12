@@ -18,10 +18,21 @@ public int plan_version { get; set; default = 0; }
 // taken before the manifest loads (main.vala); kept here for status.
 public string startup { get; set; default = ""; }
 public bool disable_all { get; set; default = false; }
+// Daemon log verbosity ("info" | "debug"), applied to Log on each reload so
+// an operator can flip verbose diagnostics via inject.json at runtime. Unknown
+// values fall back to "info".
+public string log_level { get; set; default = "info"; }
 public GenericArray<PlanEntry> entries { get; private set; }
+// Agent ids the app requested but the manifest rejected (unknown id,
+// duplicate, oversized config). Kept separate from `entries` so the
+// injection snapshot never carries rejected agents, but the supervisor
+// can still surface them in inject-status.json (Bug 2: a rejected plan
+// must not leave status at state:ready, injections:[]).
+public GenericArray<string> rejected_ids { get; private set; }
 
 public Plan() {
     this.entries = new GenericArray<PlanEntry> ();
+    this.rejected_ids = new GenericArray<string> ();
 }
 }
 
@@ -64,6 +75,7 @@ public Plan validate(string json) {
     plan.plan_version = safe_int(obj, "version", 0);
     plan.startup = safe_string(obj, "startup", "");
     plan.disable_all = safe_bool(obj, "disabled", false);
+    plan.log_level = safe_string(obj, "log_level", "info");
 
     if (!obj.has_member("agents")) {
         return plan;
@@ -89,10 +101,12 @@ public Plan validate(string json) {
         }
         if (seen.lookup(id)) {
             Log.err("plan", "rejected duplicate agent id " + id);
+            plan.rejected_ids.add(id);
             continue;
         }
         if (this.manifest.find(id) == null) {
             Log.err("plan", "rejected unknown agent id " + id);
+            plan.rejected_ids.add(id);
             continue;
         }
         seen.insert(id, true);
@@ -103,6 +117,7 @@ public Plan validate(string json) {
         }
         if (config.length > MAX_CONFIG_BYTES) {
             Log.err("plan", "rejected oversized config for " + id);
+            plan.rejected_ids.add(id);
             continue;
         }
         plan.entries.add(new PlanEntry(id, enabled, config));

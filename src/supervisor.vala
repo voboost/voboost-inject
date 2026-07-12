@@ -251,6 +251,15 @@ private void wire_events() {
                 load_plan();
                 apply_plan_diff.begin();
             });
+    // Bug 1: the run/disable kill-switch file is now monitored by the
+    // app-zone watcher. Re-evaluate kill_switched() (load_plan refreshes
+    // status.kill_switch from the run dir) and run apply_plan_diff, which
+    // handles both activation (shut frida down) and deactivation (the
+    // "restart required" path per device-safety spec).
+    this.app_watcher.kill_switch_changed.connect(() => {
+                load_plan();
+                apply_plan_diff.begin();
+            });
     // OTA: a staged core APK update is re-verified with the embedded key and
     // applied here. Staged content stays untrusted until the Ota module
     // re-verifies it (app-interface "Staging read boundary").
@@ -282,6 +291,33 @@ private void load_plan() {
     }
     var reader = new PlanReader(this.manifest);
     Plan new_plan = reader.validate(json);
+
+    // Apply the plan's log verbosity before any further processing so a
+    // log_level change is observed even when the snapshot swap is deferred
+    // (inject_in_progress). An operator flips verbose diagnostics by editing
+    // inject.json; the app_watcher reload fires load_plan on the change.
+    Log.set_debug(new_plan.log_level == "debug");
+
+    // Bug 2: surface plan rejections in inject-status.json. A rejected
+    // agent (unknown id / duplicate / oversized config) is dropped from
+    // the injection snapshot, but the app must still observe the
+    // rejection — otherwise status stays state:ready, injections:[]
+    // while the plan was partially rejected. Record each rejected id as
+    // a FAILED injection (process "" — unknown to the manifest) and mark
+    // the daemon DEGRADED so the app can act on it. Done before the
+    // inject_in_progress deferral so the rejection is visible at once
+    // even while an in-flight cycle finishes against the old snapshot.
+    bool had_rejections = new_plan.rejected_ids.length > 0;
+    for (uint i = 0; i < new_plan.rejected_ids.length; i++) {
+        this.status.set_injection(
+            new_plan.rejected_ids[i], "",
+            InjectionState.FAILED);
+    }
+    if (had_rejections && this.state == DaemonState.READY) {
+        this.status.daemon_state = "degraded";
+    } else if (!had_rejections && this.state == DaemonState.READY) {
+        this.status.daemon_state = "ready";
+    }
 
     // The kill-switch flag and the kill/panic status are independent of the
     // injection snapshot, so apply them immediately: a plan `disabled`
