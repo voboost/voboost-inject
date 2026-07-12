@@ -149,6 +149,43 @@ public void write_atomic() throws Error {
         Posix.fsync(dfd);
         Posix.close(dfd);
     }
+    // The daemon runs as root, so the renamed file is owned by root:root
+    // and labelled system_data_file. The unprivileged app (untrusted_app)
+    // cannot read a root-owned system_data_file in enforcing mode. Chown
+    // the status file to the app's UID:GID, resolved from the parent app
+    // zone dir (the package manager owns it as the app UID). This also
+    // makes the file inherit the app's SELinux label (app_data_file) on
+    // most Android releases, so the app can read it. Best-effort and
+    // non-fatal: a failure (e.g. the app zone is not yet installed) only
+    // leaves the file root-owned, which is still readable in permissive
+    // mode; the next successful write retries the chown.
+    chown_to_app_zone_owner(dir);
+}
+
+// Resolve the app zone dir owner (UID:GID) via stat and chown the status
+// file to it. Best-effort: silently ignores stat/chown failures (the app
+// may not be installed yet, or the dir may be a symlink the daemon must
+// not follow). Never throws — a failed chown does not corrupt the write.
+private void chown_to_app_zone_owner(string dir) {
+    Posix.Stat st;
+    if (Posix.stat(dir, out st) != 0) {
+        return;
+    }
+    if (st.st_uid == 0 && st.st_gid == 0) {
+        // The app zone is still root-owned (provision did not fix
+        // ownership yet, or the app is not installed). Chowning to root
+        // would be a no-op and would not help the app read the file; skip
+        // and let the next write retry once the zone is app-owned.
+        return;
+    }
+    // lchown (not chown) so a racing symlink at the status path cannot
+    // redirect the ownership change at a different file. The status path
+    // was just renamed from a regular temp, so it is a regular file here
+    // in the normal case; lchown is the safe choice regardless.
+    int rc = Posix.lchown(this.path, st.st_uid, st.st_gid);
+    if (rc != 0) {
+        Log.err("status", "chown inject-status.json to app uid failed");
+    }
 }
 }
 }

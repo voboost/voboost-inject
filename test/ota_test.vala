@@ -198,6 +198,135 @@ void test_apk_extract_missing_entry() {
     assert(!Ota.extract_apk_entry(apk, "assets/no-such-entry", out bin));
 }
 
+// Build a minimal in-memory ZIP with one deflated entry whose central-
+// directory uncomp_size is understated (set to 1), so the inflate growth
+// path fires: the initial out_cap is too small and the buffer must grow to
+// hold the real inflated bytes. This validates the F1 fix (the growth cap
+// must not falsely reject a stream whose true size is between half-cap and
+// full-cap; here the true size is small and the hint is lying).
+//
+// The raw deflate stream is produced by ZlibCompressor (RAW format) so it
+// matches what inflate_raw expects. The ZIP is assembled by hand: one
+// central-directory entry + one local file header + the deflated data +
+// the EOCD record.
+uint8[] build_lying_deflate_zip(string entry_name, string payload) {
+    // Compress the payload with raw deflate.
+    var comp = new ZlibCompressor(ZlibCompressorFormat.RAW);
+    var min = new MemoryInputStream.from_data(payload.data);
+    var cin = new ConverterInputStream(min, comp);
+    var out_buf = new uint8[4096];
+    size_t total = 0;
+    var tmp = new uint8[4096];
+    while (true) {
+        ssize_t n = cin.read(tmp);
+        if (n == 0) {
+            break;
+        }
+        if (total + n > out_buf.length) {
+            var grown = new uint8[out_buf.length * 2];
+            Posix.memcpy(grown, out_buf, total);
+            out_buf = grown;
+        }
+        Posix.memcpy(&out_buf[total], tmp, (size_t) n);
+        total += (size_t) n;
+    }
+    uint8[] comp_data = out_buf[0 : total];
+    int comp_size = (int) comp_data.length;
+    int real_uncomp = payload.data.length;
+
+    // Local file header (30 bytes) + name + deflated data.
+    uint8[] name = entry_name.data;
+    int name_len = name.length;
+    int local_size = 30 + name_len + comp_size;
+    var local = new uint8[local_size];
+    // Signature 0x04034b50.
+    local[0] = 0x50; local[1] = 0x4b; local[2] = 0x03; local[3] = 0x04;
+    write_le16(local, 4, 20);  // version needed
+    write_le16(local, 6, 0);   // flags
+    write_le16(local, 8, 8);   // method = deflate
+    write_le16(local, 10, 0);  // mod time
+    write_le16(local, 12, 0);  // mod date
+    write_le32(local, 14, 0);  // crc32 (not checked by the reader)
+    write_le32(local, 18, comp_size);
+    write_le32(local, 22, real_uncomp);  // local uncomp_size (honest)
+    write_le16(local, 26, name_len);
+    write_le16(local, 28, 0);  // extra len
+    Posix.memcpy(&local[30], name, name_len);
+    Posix.memcpy(&local[30 + name_len], comp_data, comp_size);
+
+    // Central directory entry (46 bytes) + name.
+    int cd_size = 46 + name_len;
+    var cd = new uint8[cd_size];
+    cd[0] = 0x50; cd[1] = 0x4b; cd[2] = 0x01; cd[3] = 0x02;
+    write_le16(cd, 4, 20);   // version made by
+    write_le16(cd, 6, 20);   // version needed
+    write_le16(cd, 8, 0);    // flags
+    write_le16(cd, 10, 8);   // method = deflate
+    write_le16(cd, 12, 0);   // mod time
+    write_le16(cd, 14, 0);   // mod date
+    write_le32(cd, 16, 0);   // crc32
+    write_le32(cd, 20, comp_size);
+    // LYING uncomp_size: 1 (forces the growth path).
+    write_le32(cd, 24, 1);
+    write_le16(cd, 28, name_len);
+    write_le16(cd, 30, 0);  // extra len
+    write_le16(cd, 32, 0);  // comment len
+    write_le16(cd, 34, 0);  // disk number start
+    write_le16(cd, 36, 0);  // internal attrs
+    write_le32(cd, 38, 0);  // external attrs
+    write_le32(cd, 42, 0);  // local header offset
+    Posix.memcpy(&cd[46], name, name_len);
+
+    // EOCD (22 bytes).
+    var eocd = new uint8[22];
+    eocd[0] = 0x50; eocd[1] = 0x4b; eocd[2] = 0x05; eocd[3] = 0x06;
+    write_le16(eocd, 4, 0);   // disk number
+    write_le16(eocd, 6, 0);   // disk with cd
+    write_le16(eocd, 8, 1);   // entries on this disk
+    write_le16(eocd, 10, 1);  // total entries
+    write_le32(eocd, 12, cd_size);
+    write_le32(eocd, 16, local_size);  // cd offset
+    write_le16(eocd, 20, 0);  // comment len
+
+    // Concatenate: local + cd + eocd.
+    var apk = new uint8[local_size + cd_size + 22];
+    Posix.memcpy(apk, local, local_size);
+    Posix.memcpy(&apk[local_size], cd, cd_size);
+    Posix.memcpy(&apk[local_size + cd_size], eocd, 22);
+    return apk;
+}
+
+void write_le16(uint8[] b, int off, int v) {
+    b[off] = (uint8) (v & 0xff);
+    b[off + 1] = (uint8) ((v >> 8) & 0xff);
+}
+
+void write_le32(uint8[] b, int off, int v) {
+    b[off] = (uint8) (v & 0xff);
+    b[off + 1] = (uint8) ((v >> 8) & 0xff);
+    b[off + 2] = (uint8) ((v >> 16) & 0xff);
+    b[off + 3] = (uint8) ((v >> 24) & 0xff);
+}
+
+// A deflated entry whose central-directory uncomp_size is understated (1)
+// must still inflate correctly via the growth path: the initial out_cap is
+// too small, the buffer grows, and the full payload is returned. This
+// validates the F1 fix (the growth cap must not falsely reject).
+void test_apk_extract_deflated_growth_path() {
+    // A payload large enough to force at least one growth step from out_cap=1.
+    var sb = new StringBuilder();
+    for (int i = 0; i < 2000; i++) {
+        sb.append_c('x');
+    }
+    string payload = sb.str;
+    uint8[] apk = build_lying_deflate_zip("entry.bin", payload);
+    uint8[] extracted;
+    assert(Ota.extract_apk_entry(apk, "entry.bin", out extracted));
+    // The inflated bytes must equal the original payload.
+    assert(extracted.length == payload.data.length);
+    assert(Posix.memcmp(extracted, payload.data, extracted.length) == 0);
+}
+
 // --- core APK apply / rollback --------------------------------------------
 
 // A successful self-replace: the running binary is renamed to .prev, the new
@@ -417,6 +546,8 @@ public static int main(string[] args) {
     Test.add_func("/ota/apk-extract/binary", test_apk_extract_binary);
     Test.add_func("/ota/apk-extract/binary-deflated", test_apk_extract_binary_deflated);
     Test.add_func("/ota/apk-extract/missing", test_apk_extract_missing_entry);
+    Test.add_func("/ota/apk-extract/deflated-growth-path",
+                  test_apk_extract_deflated_growth_path);
     Test.add_func("/ota/core-apk-apply/success", test_core_apk_apply_success);
     Test.add_func("/ota/core-apk-apply/deflated", test_core_apk_apply_deflated);
     Test.add_func("/ota/core-apk-apply/bad-embedded-sig", test_core_apk_apply_bad_embedded_sig);

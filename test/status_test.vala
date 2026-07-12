@@ -115,11 +115,46 @@ void test_symlink_at_temp_does_not_follow() {
     Posix.rmdir(dir);
 }
 
+// The daemon runs as root and writes inject-status.json into the app
+// zone. Without a chown the file ends up root:root (system_data_file
+// SELinux label) and the unprivileged app cannot read it in enforcing
+// mode. write_atomic must chown the status file to the parent app-zone
+// dir owner (the app UID:GID). On the host the test runs as the current
+// user, so the parent dir owner is the current user and the status file
+// must end up owned by that same uid:gid (not root, not 0:0).
+void test_chown_to_dir_owner() {
+    string dir = Path.build_filename(
+        Environment.get_tmp_dir(),
+        "vob-status-chown-%d".printf(Posix.getpid()));
+    DirUtils.create_with_parents(dir, 0700);
+    string path = Path.build_filename(dir, "inject-status.json");
+    var st = new Status(path);
+    st.set_injection("a", "p", InjectionState.ACTIVE);
+    try {
+        st.write_atomic();
+    } catch (Error e) {
+        assert_not_reached();
+    }
+
+    Posix.Stat dir_st;
+    assert(Posix.stat(dir, out dir_st) == 0);
+    Posix.Stat file_st;
+    assert(Posix.stat(path, out file_st) == 0);
+    // The status file must inherit the parent dir owner (app uid:gid on
+    // device, current user on host). It must NOT stay root:root.
+    assert(file_st.st_uid == dir_st.st_uid);
+    assert(file_st.st_gid == dir_st.st_gid);
+
+    FileUtils.unlink(path);
+    Posix.rmdir(dir);
+}
+
 public static int main(string[] args) {
     Test.init(ref args);
     Test.add_func("/status/serialize-states", test_serialize_all_states);
     Test.add_func("/status/atomic-write", test_atomic_write_and_reread);
     Test.add_func("/status/multi-process", test_multi_process_same_agent_id);
     Test.add_func("/status/symlink-temp", test_symlink_at_temp_does_not_follow);
+    Test.add_func("/status/chown-to-dir-owner", test_chown_to_dir_owner);
     return Test.run();
 }

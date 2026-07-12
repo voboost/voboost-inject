@@ -34,8 +34,8 @@ public bool boot_completed() {
         string stdout_buf;
         int exit_status;
         Process.spawn_sync(null, argv, null,
-                          SpawnFlags.SEARCH_PATH, null,
-                          out stdout_buf, null, out exit_status);
+                           SpawnFlags.SEARCH_PATH, null,
+                           out stdout_buf, null, out exit_status);
         if (exit_status == 0 && stdout_buf.strip() == "1") {
             // Boot is monotonic: cache the positive result so the polling
             // loop never forks getprop again.

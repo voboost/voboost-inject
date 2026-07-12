@@ -641,13 +641,22 @@ private static bool inflate_raw(uint8[] comp, int64 uncomp_size,
             if (total + n > out_cap) {
                 // Hint was too small: grow (only the growable path reaches
                 // here; a positive trustworthy hint that underflows means a
-                // corrupt stream and is rejected).
+                // corrupt stream and is rejected). Double until `need` fits,
+                // clamping at MAX_APK_BYTES: if `need` still exceeds the cap
+                // the stream is genuinely too large.
                 size_t need = total + (size_t) n;
                 while (need > out_cap) {
-                    if (out_cap * 2 > MAX_APK_BYTES) {
-                        return false;
-                    }
                     out_cap *= 2;
+                    if (out_cap > MAX_APK_BYTES) {
+                        // Clamp to the cap rather than overshooting. If
+                        // `need` still exceeds the cap, the stream is
+                        // genuinely too large and is rejected.
+                        out_cap = (size_t) MAX_APK_BYTES;
+                        if (need > out_cap) {
+                            return false;
+                        }
+                        break;
+                    }
                 }
                 var grown = new uint8[out_cap];
                 Posix.memcpy(grown, out_buf, total);

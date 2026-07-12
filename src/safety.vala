@@ -100,6 +100,10 @@ public bool allow_attempt(string agent, string process) {
     // history): once N in-window attempts are recorded the next is
     // quarantined, and attempts older than the window stop counting and are
     // evicted as the ring advances.
+    // Invariant: `fill` saturates at `sz` (== max_attempts), so once the
+    // ring is full the linear scan `0..fill-1` == `0..sz-1` reads every
+    // slot — every slot holds a valid timestamp (overwritten in place by
+    // `head % sz`), so the count is complete even after wrap-around.
     int64 cutoff = now - (int64) this.window_minutes * 60;
     uint count = 0;
     for (uint i = 0; i < log.fill; i++) {

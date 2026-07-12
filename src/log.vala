@@ -6,7 +6,8 @@ namespace Voboost {
 public enum LogTag {
     MINUS,
     PLUS,
-    STAR;
+    STAR,
+    DEBUG;
 
     public string symbol() {
         switch (this) {
@@ -14,6 +15,8 @@ public enum LogTag {
             return "+";
         case LogTag.STAR:
             return "*";
+        case LogTag.DEBUG:
+            return "#";
         default:
             return "-";
         }
@@ -24,6 +27,10 @@ public class Log : Object {
 public string dir { get; construct; }
 
 private static Log? instance;
+// Debug verbosity, toggled at runtime by the plan's `log_level` field
+// ("debug" => on). Lets an operator see frida/inject internals by editing
+// inject.json — no rebuild, no reinstall. Default off.
+private static bool debug_enabled = false;
 // Unix timestamp of the last retention pass; 0 = never run.
 private int64 last_prune_ts = 0;
 
@@ -42,6 +49,16 @@ public static Log get_default() {
     return instance;
 }
 
+// Toggle debug verbosity at runtime (called from Supervisor.load_plan when
+// the plan's log_level changes). Idempotent.
+public static void set_debug(bool enabled) {
+    debug_enabled = enabled;
+}
+
+public static bool get_debug() {
+    return debug_enabled;
+}
+
 public static void info(string source, string message) {
     get_default().write(LogTag.STAR, source, message);
 }
@@ -54,6 +71,16 @@ public static void err(string source, string message) {
     get_default().write(LogTag.MINUS, source, message);
 }
 
+// Verbose diagnostics: frida enumerate counts, /proc scans, attach/load
+// steps. Suppressed unless the plan set log_level "debug". Use freely in
+// hot paths — the flag check is a static bool read, not a syscall.
+public static void debug(string source, string message) {
+    if (!debug_enabled) {
+        return;
+    }
+    get_default().write(LogTag.DEBUG, source, message);
+}
+
 public void write(LogTag tag, string source, string message) {
     var now = new DateTime.now_local();
     string stamp = now.format("%Y-%m-%d %H:%M:%S");
@@ -64,9 +91,8 @@ public void write(LogTag tag, string source, string message) {
     try {
         ensure_dir();
         string path = today_path(now);
-        var file = File.new_for_path(path);
-        bool existed = file.query_exists(null);
-        var stream = file.append_to(FileCreateFlags.PRIVATE, null);
+        var stream = File.new_for_path(path).append_to(
+            FileCreateFlags.PRIVATE, null);
         try {
             stream.write(line.data, null);
         } finally {
@@ -78,10 +104,13 @@ public void write(LogTag tag, string source, string message) {
             } catch (Error close_err) {
             }
         }
-        // chmod only on first write of a new daily log file.
-        if (!existed) {
-            FileUtils.chmod(path, 0600);
-        }
+        // Enforce 0600 on every write: a prior daemon run or a misbehaving
+        // process may have left the daily log file group/world-readable,
+        // and the spec (app-interface "Root-only logging") requires 600.
+        // chmod is idempotent and cheap (one syscall), so always apply it
+        // rather than only on first creation — this also tightens a pre-
+        // existing over-permissive same-named file on the next write.
+        FileUtils.chmod(path, 0600);
     } catch (Error e) {
         stderr.printf("log write: %s\n", e.message);
     }

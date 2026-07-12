@@ -5,18 +5,33 @@ namespace Voboost {
 // and #Staging read boundary.
 public class AppZoneWatcher : Object {
 public string app_zone { get; construct; }
+// Root run-zone (/data/voboost/run) watched for the kill-switch
+// `disable` file (Bug 1). The device-safety spec requires the daemon
+// react when run/disable "appears while the daemon is running" — a
+// SHALL requirement, not best-effort. Without this monitor the
+// kill-switch is only re-checked on spawn/death/plan-change events, so
+// on a quiet device creating run/disable has no effect.
+public string run_zone { get; construct; }
 public uint debounce_ms { get; construct; }
 
 public signal void plan_changed();
 public signal void core_update_ready();
+// Fired when the run/disable kill-switch file is created or deleted.
+// The supervisor re-evaluates kill_switched() and runs apply_plan_diff
+// (which handles both activation and deactivation).
+public signal void kill_switch_changed();
 
 private FileMonitor? plan_mon;
 private FileMonitor? staging_mon;
+private FileMonitor? kill_mon;
 private uint plan_timer = 0;
 private uint staging_timer = 0;
+private uint kill_timer = 0;
 
-public AppZoneWatcher(string app_zone, uint debounce_ms = 500) {
-    Object(app_zone: app_zone, debounce_ms: debounce_ms);
+public AppZoneWatcher(string app_zone, string run_zone,
+                      uint debounce_ms = 500) {
+    Object(app_zone: app_zone, run_zone: run_zone,
+           debounce_ms: debounce_ms);
 }
 
 public void start() throws Error {
@@ -53,7 +68,40 @@ public void start() throws Error {
 
     // Establish the staging monitor now if staging/ already exists at start.
     ensure_staging_monitor();
+    // Bug 1: watch the root run-zone for the kill-switch `disable` file.
+    // The run dir is created by the daemon's single-instance lock before
+    // start(), so it exists; a missing dir is not fatal (best-effort,
+    // retried never — but run/ is guaranteed present). Watch the
+    // DIRECTORY (not the file) for the same inode-swap reason as
+    // inject.json: an atomic temp+rename create/delete of `disable`
+    // swaps the inode, which a file monitor can miss.
+    ensure_kill_switch_monitor();
     Log.info("watcher", "watching " + this.app_zone);
+}
+
+// Create the run-zone directory monitor for the kill-switch `disable`
+// file. Idempotent. Best-effort: a missing run/ is not an error (the
+// daemon creates it at startup, so this is defensive only).
+private void ensure_kill_switch_monitor() {
+    if (this.kill_mon != null) {
+        return;
+    }
+    try {
+        this.kill_mon = File.new_for_path(this.run_zone).monitor_directory(
+            FileMonitorFlags.NONE, null);
+    } catch (Error e) {
+        return;  // run/ absent; defensive only (daemon creates it)
+    }
+    // CREATED/DELETED carry `disable` as `file` (`other` is null for a
+    // plain create/delete). Both args are nullable in the GFileMonitor
+    // contract; guard `file` so a rename-only event does not null-deref.
+    this.kill_mon.changed.connect((file, other, ev) => {
+                string? name = file != null ? file.get_basename() : null;
+                string? oname = other != null ? other.get_basename() : null;
+                if (name == "disable" || oname == "disable") {
+                    schedule_kill();
+                }
+            });
 }
 
 // Create the staging/ directory monitor if staging/ exists and is not yet
@@ -116,6 +164,17 @@ private void schedule_staging() {
             });
 }
 
+private void schedule_kill() {
+    if (this.kill_timer != 0) {
+        Source.remove(this.kill_timer);
+    }
+    this.kill_timer = Timeout.add(this.debounce_ms, () => {
+                this.kill_timer = 0;
+                kill_switch_changed();
+                return Source.REMOVE;
+            });
+}
+
 public void stop() {
     if (this.plan_mon != null) {
         this.plan_mon.cancel();
@@ -125,6 +184,10 @@ public void stop() {
         this.staging_mon.cancel();
         this.staging_mon = null;
     }
+    if (this.kill_mon != null) {
+        this.kill_mon.cancel();
+        this.kill_mon = null;
+    }
     if (this.plan_timer != 0) {
         Source.remove(this.plan_timer);
         this.plan_timer = 0;
@@ -132,6 +195,10 @@ public void stop() {
     if (this.staging_timer != 0) {
         Source.remove(this.staging_timer);
         this.staging_timer = 0;
+    }
+    if (this.kill_timer != 0) {
+        Source.remove(this.kill_timer);
+        this.kill_timer = 0;
     }
 }
 }
