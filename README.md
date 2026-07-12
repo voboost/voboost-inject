@@ -1,5 +1,7 @@
 # voboost-inject
 
+**English** | [Русский](README.ru.md)
+
 **voboost-inject** is the root injection component of Voboost: a single native
 Vala binary that embeds [frida-core](https://frida.re) (QuickJS engine, no V8),
 runs as **root**, and injects cryptographically **signed** agents into target
@@ -22,14 +24,14 @@ voboost-inject is one component of a multi-repo system:
   (`ru.voboost`); ships the agents in its APK and writes `inject.json`.
 - **`voboost-inject`** *(this repo)* — the root daemon; verifies and injects
   signed agents.
-- [`voboost-agent`](https://github.com/voboost/voboost-agent) — the Frida
+- [`voboost-script`](https://github.com/voboost/voboost-script) — the Frida
   JavaScript agents and the **signed agent-set manifest** they ship in.
 - [`voboost-install`](https://github.com/voboost/voboost-install) — device
   bring-up: first install of the daemon binary, agents, and the `/system` init
   hook.
 
 This README covers the daemon's contract and build. Agent authoring and signing
-live in [`voboost-agent`](https://github.com/voboost/voboost-agent); end-to-end
+live in [`voboost-script`](https://github.com/voboost/voboost-script); end-to-end
 device bring-up lives in
 [`voboost-install`](https://github.com/voboost/voboost-install).
 
@@ -257,16 +259,16 @@ The device-safety rules above fire at fixed thresholds compiled into the daemon
 ## Writing agents
 
 Agents are authored, built, and signed in
-[`voboost-agent`](https://github.com/voboost/voboost-agent); this section
+[`voboost-script`](https://github.com/voboost/voboost-script); this section
 describes the per-agent contract the daemon verifies, so a manifest is
 recognizable from the daemon's side. The tooling to assemble the manifest and
 sign it with the matching private key is part of
-[`voboost-agent`](https://github.com/voboost/voboost-agent).
+[`voboost-script`](https://github.com/voboost/voboost-script).
 
 An agent is JavaScript that runs on frida-core's QuickJS runtime — see
 *Per-target lifecycle* above. It is verified by manifest signature + sha256
 and receives the same opaque `config`. Every shipped agent is JavaScript (see
-[`voboost-agent`](https://github.com/voboost/voboost-agent)).
+[`voboost-script`](https://github.com/voboost/voboost-script)).
 
 The agent-set manifest (`manifest.json`, signed into `manifest.sig` and shipped
 inside the app's APK) is an object with a `version`, an optional `daemon`, and
@@ -625,4 +627,7 @@ frida-core, frida-gum, all pinned to tag `17.11.0`), fetched and cached on
 
 ## License
 
-GNU General Public License v3. See [LICENSE](LICENSE).
+Dual-licensed:
+
+- [PolyForm Noncommercial 1.0.0](https://github.com/voboost/voboost-license/blob/main/LICENSE) — free for personal use
+- [Commercial license](https://github.com/voboost/voboost-license/blob/main/COMMERCIAL.md) — required otherwise
