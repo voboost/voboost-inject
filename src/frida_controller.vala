@@ -148,19 +148,60 @@ public async uint? find_pid(string process) {
     if (this.device == null) {
         return null;
     }
+    // frida's enumerate_processes reports the app *label* as Process.name on
+    // Android (e.g. "Launcher Stub"), not the package id the plan targets
+    // ("com.qinggan.app.launcher"); the package is not in parameters either.
+    // So match the frida name first (covers native/system processes whose
+    // name IS the lookup key, e.g. "system_server"), then fall back to
+    // /proc/<pid>/cmdline argv[0], which is the package id for app processes.
     try {
-        // frida-core 17.x: enumerate_processes (ProcessQueryOptions?
-        // = null, ...); pass explicit defaults for clarity.
         var opts = new Frida.ProcessQueryOptions();
         var procs = yield this.device.enumerate_processes(opts);
+        Log.debug("frida", "find_pid('%s'): enumerate returned %u procs".printf(
+                      process, procs.size()));
         for (int i = 0; i < procs.size(); i++) {
             var p = procs.get(i);
             if (p.name == process) {
+                Log.debug("frida", "find_pid('%s'): matched name pid=%u".printf(
+                              process, (uint) p.pid));
                 return (uint) p.pid;
             }
         }
     } catch (Error e) {
         Log.err("frida", "enumerate failed: " + e.message);
+    }
+    try {
+        var dir = Dir.open("/proc", 0);
+        string? n;
+        int scanned = 0;
+        while ((n = dir.read_name()) != null) {
+            if (n.length == 0 || !n[0].isdigit()) {
+                continue;
+            }
+            scanned++;
+            string cmdline;
+            try {
+                FileUtils.get_contents("/proc/%s/cmdline".printf(n),
+                                       out cmdline);
+            } catch (Error e) {
+                continue;
+            }
+            // FileUtils.get_contents returns a NUL-terminated C string;
+            // the first NUL in /proc/<pid>/cmdline (which separates
+            // argv[0] from argv[1]) becomes the string terminator, so
+            // cmdline already IS argv[0] — the package id for app
+            // processes. Do NOT split on NUL: g_strsplit rejects NUL
+            // delimiters (CRITICAL + SIGSEGV).
+            if (cmdline == process) {
+                Log.debug("frida", "find_pid('%s'): matched /proc pid=%s".printf(
+                              process, n));
+                return (uint) uint64.parse(n);
+            }
+        }
+        Log.debug("frida", "find_pid('%s'): /proc scanned %d, no match".printf(
+                      process, scanned));
+    } catch (Error e) {
+        Log.err("frida", "find_pid /proc: " + e.message);
     }
     return null;
 }
