@@ -11,12 +11,5 @@
 !frida-core.wrap
 !frida-gum.wrap
 !frida.wrap
-!libgee.wrap
-!libnice.wrap
-!libpsl.wrap
-!libsoup.wrap
 !monocypher.wrap
-!quickjs.wrap
 !selinux.wrap
-!tinycc.wrap
-!usrsctp.wrap
