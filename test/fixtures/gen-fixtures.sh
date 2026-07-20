@@ -4,7 +4,7 @@
 #   used by the boot-recovery tests and as the APK's embedded manifest;
 # - a matching agent payload (agents/wm-viewport.js);
 # - a signed release manifest (release-manifest.json + .sig) listing the daemon
-#   APK as a single core entry, plus negative fixtures (bad-entry, bad-channel,
+#   APK as a single inject entry, plus negative fixtures (bad-entry, bad-channel,
 #   bad-sig, oversize);
 # - a daemon APK (voboost-inject.apk): a ZIP with assets/manifest.json,
 #   assets/manifest.sig, assets/voboost-inject (the daemon ELF binary), built
@@ -79,10 +79,10 @@ printf "\\$(printf '%03o' "$flipped")" \
 # A dummy binary; the daemon's ZIP reader extracts it verbatim (stored) or
 # inflated (deflate). Two variants: a "good" one and a "bad" one (different
 # content, for the bad-binary negative test).
-printf 'fake-core-binary-v1\n' > "$here/voboost-inject"
-printf 'fake-core-binary-BAD\n' > "$here/voboost-inject-bad"
+printf 'fake-inject-binary-v1\n' > "$here/voboost-inject"
+printf 'fake-inject-binary-BAD\n' > "$here/voboost-inject-bad"
 
-# --- release manifest (lists the daemon APK as the core entry) -----------
+# --- release manifest (lists the daemon APK as the inject entry) ---------
 # The release manifest is the OTA client's trust source for the APK size+sha256
 # before staging. It lists the APK (voboost-inject.apk), not the raw binary.
 apk="$here/voboost-inject.apk"
@@ -129,9 +129,9 @@ apk_size=$(stat -f%z "$apk" 2>/dev/null || stat -c%s "$apk" 2>/dev/null)
 cat > "$here/release-manifest.json" <<JSON
 {
   "version": "1.0.0-beta1",
-  "channel": "core",
+  "channel": "inject",
   "files": [
-    {"path":"voboost-inject.apk","channel":"core","sha256":"$apk_sha","size":$apk_size,"version":"1.0.0-beta1"}
+    {"path":"voboost-inject.apk","channel":"inject","sha256":"$apk_sha","size":$apk_size,"version":"1.0.0-beta1"}
   ]
 }
 JSON
@@ -150,8 +150,8 @@ printf "\\$(printf '%03o' "$flipped")" \
 # whole manifest on one bad entry even though the signature verifies
 # (release-manifest spec).
 cat > "$here/release-manifest-bad-entry.json" <<JSON
-{"version":"1.0.0-beta1","channel":"core","files":[
-  {"path":"voboost-inject.apk","channel":"core","sha256":"$apk_sha","version":"1.0.0-beta1"}
+{"version":"1.0.0-beta1","channel":"inject","files":[
+  {"path":"voboost-inject.apk","channel":"inject","sha256":"$apk_sha","version":"1.0.0-beta1"}
 ]}
 JSON
 openssl pkeyutl -sign -inkey "$priv" -rawin \
@@ -159,7 +159,7 @@ openssl pkeyutl -sign -inkey "$priv" -rawin \
   -out "$here/release-manifest-bad-entry.json.sig"
 
 cat > "$here/release-manifest-bad-channel.json" <<JSON
-{"version":"1.0.0-beta1","channel":"core","files":[
+{"version":"1.0.0-beta1","channel":"inject","files":[
   {"path":"voboost-inject.apk","channel":"widgets","sha256":"$apk_sha","size":$apk_size,"version":"1.0.0-beta1"}
 ]}
 JSON

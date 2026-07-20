@@ -53,7 +53,7 @@ string fresh_dir(string role) {
     return d;
 }
 
-// A temp root_zone with a run/ subdir (the core-switch marker lives there).
+// A temp root_zone with a run/ subdir (the inject-switch marker lives there).
 string fresh_root() {
     string d = fresh_dir("root");
     DirUtils.create(Path.build_filename(d, "run"), 0700);
@@ -80,13 +80,13 @@ ReleaseManifest load_release_manifest(Ota ota) {
     return rm;
 }
 
-// Stage a daemon APK + the core-update-ready marker into staging/.
-void stage_core_apk(string staging, string apk_name) {
+// Stage a daemon APK + the voboost-inject-update-ready marker into staging/.
+void stage_inject_apk(string staging, string apk_name) {
     copy_file(FIX + "/" + apk_name,
               Path.build_filename(staging, "voboost-inject.apk"));
     try {
         FileUtils.set_contents(
-            Path.build_filename(staging, "core-update-ready"), "ready");
+            Path.build_filename(staging, "voboost-inject-update-ready"), "ready");
     } catch (FileError e) {
         assert_not_reached();
     }
@@ -96,7 +96,7 @@ void stage_core_apk(string staging, string apk_name) {
 void write_old_binary(string root) {
     try {
         FileUtils.set_contents(
-            Path.build_filename(root, "voboost-inject"), "old-core-binary\n");
+            Path.build_filename(root, "voboost-inject"), "old-inject-binary\n");
     } catch (FileError e) {
         assert_not_reached();
     }
@@ -113,10 +113,10 @@ void test_release_manifest_verify() {
     var ota = new Ota("/data/voboost", new TrustStore());
     var rm = load_release_manifest(ota);
     assert(rm.version == "1.0.0-beta1");
-    assert(rm.channel == "core");
+    assert(rm.channel == "inject");
     assert(rm.files.length == 1);
     assert(rm.files[0].path == "voboost-inject.apk");
-    assert(rm.files[0].channel == "core");
+    assert(rm.files[0].channel == "inject");
     assert(rm.files[0].size > 0);
 }
 
@@ -327,23 +327,23 @@ void test_apk_extract_deflated_growth_path() {
     assert(Posix.memcmp(extracted, payload.data, extracted.length) == 0);
 }
 
-// --- core APK apply / rollback --------------------------------------------
+// --- inject APK apply / rollback ------------------------------------------
 
 // A successful self-replace: the running binary is renamed to .prev, the new
 // binary takes the stable pathname, the marker is set, and the marker in
 // staging/ is consumed (single-use).
-void test_core_apk_apply_success() {
+void test_inject_apk_apply_success() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
     string oldsha = file_sha(Path.build_filename(root, "voboost-inject"));
-    stage_core_apk(staging, "voboost-inject.apk");
-    assert(ota.apply_core_apk_update(staging)
-           == CoreApplyOutcome.APPLIED);
+    stage_inject_apk(staging, "voboost-inject.apk");
+    assert(ota.apply_inject_update(staging)
+           == InjectApplyOutcome.APPLIED);
     // The marker is consumed (single-use).
     assert(!FileUtils.test(
-               Path.build_filename(staging, "core-update-ready"),
+               Path.build_filename(staging, "voboost-inject-update-ready"),
                FileTest.EXISTS));
     // The new binary is at the stable pathname; the old is at .prev.
     assert(file_sha(Path.build_filename(root, "voboost-inject"))
@@ -353,63 +353,63 @@ void test_core_apk_apply_success() {
                FileTest.EXISTS));
     assert(file_sha(Path.build_filename(root, "voboost-inject.prev"))
            == oldsha);
-    // The core-switch-pending marker is set.
-    assert(ota.core_switch_pending());
+    // The voboost-inject-switch-pending marker is set.
+    assert(ota.inject_switch_pending());
     rm_rf(root);
     rm_rf(staging);
 }
 
 // A deflated APK applies the same as a stored one.
-void test_core_apk_apply_deflated() {
+void test_inject_apk_apply_deflated() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
-    stage_core_apk(staging, "voboost-inject-deflated.apk");
-    assert(ota.apply_core_apk_update(staging)
-           == CoreApplyOutcome.APPLIED);
-    assert(ota.core_switch_pending());
+    stage_inject_apk(staging, "voboost-inject-deflated.apk");
+    assert(ota.apply_inject_update(staging)
+           == InjectApplyOutcome.APPLIED);
+    assert(ota.inject_switch_pending());
     rm_rf(root);
     rm_rf(staging);
 }
 
 // A bad embedded manifest signature is rejected; the current binary stays
 // active and the marker is consumed (the bad APK is dropped).
-void test_core_apk_apply_bad_embedded_sig() {
+void test_inject_apk_apply_bad_embedded_sig() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
-    stage_core_apk(staging, "voboost-inject-bad-sig.apk");
-    assert(ota.apply_core_apk_update(staging)
-           == CoreApplyOutcome.REJECTED_BAD_MANIFEST);
-    assert(!ota.core_switch_pending());
+    stage_inject_apk(staging, "voboost-inject-bad-sig.apk");
+    assert(ota.apply_inject_update(staging)
+           == InjectApplyOutcome.REJECTED_BAD_MANIFEST);
+    assert(!ota.inject_switch_pending());
     assert(!FileUtils.test(
                Path.build_filename(root, "voboost-inject.prev"),
                FileTest.EXISTS));
     // The marker is consumed even on rejection.
     assert(!FileUtils.test(
-               Path.build_filename(staging, "core-update-ready"),
+               Path.build_filename(staging, "voboost-inject-update-ready"),
                FileTest.EXISTS));
     rm_rf(root);
     rm_rf(staging);
 }
 
 // No staged APK -> REJECTED_NO_APK, marker consumed.
-void test_core_apk_apply_no_apk() {
+void test_inject_apk_apply_no_apk() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     try {
         FileUtils.set_contents(
-            Path.build_filename(staging, "core-update-ready"), "ready");
+            Path.build_filename(staging, "voboost-inject-update-ready"), "ready");
     } catch (FileError e) {
         assert_not_reached();
     }
-    assert(ota.apply_core_apk_update(staging)
-           == CoreApplyOutcome.REJECTED_NO_APK);
+    assert(ota.apply_inject_update(staging)
+           == InjectApplyOutcome.REJECTED_NO_APK);
     assert(!FileUtils.test(
-               Path.build_filename(staging, "core-update-ready"),
+               Path.build_filename(staging, "voboost-inject-update-ready"),
                FileTest.EXISTS));
     rm_rf(root);
     rm_rf(staging);
@@ -417,17 +417,17 @@ void test_core_apk_apply_no_apk() {
 
 // Rollback on a DEGRADED restart: .prev is restored over the bad new binary,
 // the marker is cleared.
-void test_core_apk_rollback_restores_prev() {
+void test_inject_apk_rollback_restores_prev() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
     string oldsha = file_sha(Path.build_filename(root, "voboost-inject"));
-    stage_core_apk(staging, "voboost-inject.apk");
-    ota.apply_core_apk_update(staging);
-    assert(ota.core_switch_pending());
-    assert(ota.rollback_core_switch());
-    assert(!ota.core_switch_pending());
+    stage_inject_apk(staging, "voboost-inject.apk");
+    ota.apply_inject_update(staging);
+    assert(ota.inject_switch_pending());
+    assert(ota.rollback_inject_switch());
+    assert(!ota.inject_switch_pending());
     // The stable pathname now holds the old binary again.
     assert(file_sha(Path.build_filename(root, "voboost-inject")) == oldsha);
     // .prev is consumed by the rollback rename.
@@ -439,16 +439,16 @@ void test_core_apk_rollback_restores_prev() {
 }
 
 // Confirm on a READY restart: marker cleared, .prev removed.
-void test_core_apk_confirm_clears_marker_and_removes_prev() {
+void test_inject_apk_confirm_clears_marker_and_removes_prev() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
-    stage_core_apk(staging, "voboost-inject.apk");
-    ota.apply_core_apk_update(staging);
-    assert(ota.core_switch_pending());
-    ota.confirm_core_switch();
-    assert(!ota.core_switch_pending());
+    stage_inject_apk(staging, "voboost-inject.apk");
+    ota.apply_inject_update(staging);
+    assert(ota.inject_switch_pending());
+    ota.confirm_inject_switch();
+    assert(!ota.inject_switch_pending());
     assert(!FileUtils.test(
                Path.build_filename(root, "voboost-inject.prev"),
                FileTest.EXISTS));
@@ -457,7 +457,7 @@ void test_core_apk_confirm_clears_marker_and_removes_prev() {
 }
 
 // No .prev rollback target: rollback returns false (stay DEGRADED).
-void test_core_apk_rollback_no_prev_target() {
+void test_inject_apk_rollback_no_prev_target() {
     string root = fresh_root();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
@@ -465,14 +465,14 @@ void test_core_apk_rollback_no_prev_target() {
     // marker write, or a first-update edge).
     try {
         FileUtils.set_contents(
-            Path.build_filename(root, "run/core-switch-pending"), "pending");
+            Path.build_filename(root, "run/voboost-inject-switch-pending"), "pending");
     } catch (FileError e) {
         assert_not_reached();
     }
-    assert(ota.core_switch_pending());
-    assert(!ota.rollback_core_switch());
+    assert(ota.inject_switch_pending());
+    assert(!ota.rollback_inject_switch());
     // The marker is cleared even when there is no .prev (no crash-loop).
-    assert(!ota.core_switch_pending());
+    assert(!ota.inject_switch_pending());
     rm_rf(root);
 }
 
@@ -548,14 +548,14 @@ public static int main(string[] args) {
     Test.add_func("/ota/apk-extract/missing", test_apk_extract_missing_entry);
     Test.add_func("/ota/apk-extract/deflated-growth-path",
                   test_apk_extract_deflated_growth_path);
-    Test.add_func("/ota/core-apk-apply/success", test_core_apk_apply_success);
-    Test.add_func("/ota/core-apk-apply/deflated", test_core_apk_apply_deflated);
-    Test.add_func("/ota/core-apk-apply/bad-embedded-sig", test_core_apk_apply_bad_embedded_sig);
-    Test.add_func("/ota/core-apk-apply/no-apk", test_core_apk_apply_no_apk);
-    Test.add_func("/ota/core-apk-apply/rollback", test_core_apk_rollback_restores_prev);
-    Test.add_func("/ota/core-apk-apply/confirm",
-                  test_core_apk_confirm_clears_marker_and_removes_prev);
-    Test.add_func("/ota/core-apk-apply/rollback-no-prev", test_core_apk_rollback_no_prev_target);
+    Test.add_func("/ota/inject-apk-apply/success", test_inject_apk_apply_success);
+    Test.add_func("/ota/inject-apk-apply/deflated", test_inject_apk_apply_deflated);
+    Test.add_func("/ota/inject-apk-apply/bad-embedded-sig", test_inject_apk_apply_bad_embedded_sig);
+    Test.add_func("/ota/inject-apk-apply/no-apk", test_inject_apk_apply_no_apk);
+    Test.add_func("/ota/inject-apk-apply/rollback", test_inject_apk_rollback_restores_prev);
+    Test.add_func("/ota/inject-apk-apply/confirm",
+                  test_inject_apk_confirm_clears_marker_and_removes_prev);
+    Test.add_func("/ota/inject-apk-apply/rollback-no-prev", test_inject_apk_rollback_no_prev_target);
     Test.add_func("/ota/boot-recovery/restores-prev", test_boot_recovery_restores_prev);
     Test.add_func("/ota/boot-recovery/noop", test_boot_recovery_noop_when_active_ok);
     Test.add_func("/ota/boot-recovery/active-bad", test_boot_recovery_restores_when_active_bad);

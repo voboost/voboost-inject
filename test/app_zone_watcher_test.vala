@@ -2,9 +2,9 @@ using Voboost;
 
 // Host-side integration test for AppZoneWatcher. Exercises the real
 // GFileMonitor + debounce path: writing inject.json fires plan_changed,
-// creating staging/core-update-ready fires core_update_ready, and creating
-// run/disable fires kill_switch_changed. Uses a real GMainLoop so the
-// debounce Timeout sources dispatch.
+// creating staging/voboost-inject-update-ready fires inject_update_ready, and
+// creating run/disable fires kill_switch_changed. Uses a real GMainLoop so
+// the debounce Timeout sources dispatch.
 //
 // The watcher watches the app-zone DIRECTORY (not the file) so an atomic
 // temp+rename write of inject.json is observed — the test mirrors that
@@ -75,10 +75,10 @@ void test_plan_changed_on_write() {
     DirUtils.remove(run_zone);
 }
 
-// core_update_ready fires when staging/core-update-ready is created and
-// staging/ already exists at start() (ensure_staging_monitor establishes
-// the monitor during start).
-void test_core_update_ready_existing_staging() {
+// inject_update_ready fires when staging/voboost-inject-update-ready is
+// created and staging/ already exists at start() (ensure_staging_monitor
+// establishes the monitor during start).
+void test_inject_update_ready_existing_staging() {
     string app_zone = fresh_dir("app");
     string run_zone = fresh_dir("run");
     // staging/ exists BEFORE start() so ensure_staging_monitor finds it.
@@ -91,12 +91,12 @@ void test_core_update_ready_existing_staging() {
         assert_not_reached();
     }
     bool fired = false;
-    w.core_update_ready.connect(() => { fired = true; });
-    atomic_write(Path.build_filename(staging, "core-update-ready"),
+    w.inject_update_ready.connect(() => { fired = true; });
+    atomic_write(Path.build_filename(staging, "voboost-inject-update-ready"),
                  "ready");
     assert(wait_for(() => fired));
     w.stop();
-    FileUtils.unlink(Path.build_filename(staging, "core-update-ready"));
+    FileUtils.unlink(Path.build_filename(staging, "voboost-inject-update-ready"));
     DirUtils.remove(staging);
     DirUtils.remove(app_zone);
     DirUtils.remove(run_zone);
@@ -122,16 +122,16 @@ void test_kill_switch_on_disable_file() {
     DirUtils.remove(run_zone);
 }
 
-// A pre-existing core-update-ready marker (created before the staging
-// monitor is established) is caught by the one-shot check in
+// A pre-existing voboost-inject-update-ready marker (created before the
+// staging monitor is established) is caught by the one-shot check in
 // ensure_staging_monitor.
-void test_preexisting_core_update_ready_marker() {
+void test_preexisting_inject_update_ready_marker() {
     string app_zone = fresh_dir("app");
     string run_zone = fresh_dir("run");
     // staging/ + marker exist BEFORE start().
     string staging = Path.build_filename(app_zone, "staging");
     DirUtils.create(staging, 0700);
-    atomic_write(Path.build_filename(staging, "core-update-ready"),
+    atomic_write(Path.build_filename(staging, "voboost-inject-update-ready"),
                  "ready");
     var w = new AppZoneWatcher(app_zone, run_zone, 100);
     try {
@@ -140,12 +140,12 @@ void test_preexisting_core_update_ready_marker() {
         assert_not_reached();
     }
     bool fired = false;
-    w.core_update_ready.connect(() => { fired = true; });
+    w.inject_update_ready.connect(() => { fired = true; });
     // The one-shot check in ensure_staging_monitor should fire the signal
     // (debounced) even though no creation event arrives.
     assert(wait_for(() => fired));
     w.stop();
-    FileUtils.unlink(Path.build_filename(staging, "core-update-ready"));
+    FileUtils.unlink(Path.build_filename(staging, "voboost-inject-update-ready"));
     DirUtils.remove(staging);
     DirUtils.remove(app_zone);
     DirUtils.remove(run_zone);
@@ -158,11 +158,11 @@ public static int main(string[] args) {
                          "vob-azw-log-%d".printf((int) Posix.getpid())));
     Test.add_func("/app-zone-watcher/plan-changed",
                   test_plan_changed_on_write);
-    Test.add_func("/app-zone-watcher/core-update-ready-existing-staging",
-                  test_core_update_ready_existing_staging);
+    Test.add_func("/app-zone-watcher/inject-update-ready-existing-staging",
+                  test_inject_update_ready_existing_staging);
     Test.add_func("/app-zone-watcher/kill-switch",
                   test_kill_switch_on_disable_file);
     Test.add_func("/app-zone-watcher/preexisting-marker",
-                  test_preexisting_core_update_ready_marker);
+                  test_preexisting_inject_update_ready_marker);
     return Test.run();
 }

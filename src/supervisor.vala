@@ -45,10 +45,10 @@ private Plan? plan = null;
 // True while an injection cycle is in progress; deferred reload waits.
 private bool inject_in_progress = false;
 private bool reload_pending = false;
-// Set when a core apply requested the self-shutdown (init restart). run() checks
+// Set when an inject apply requested the self-shutdown (init restart). run() checks
 // it after the boot early-apply so it does not start an injection cycle that the
 // pending SIGTERM teardown would immediately discard.
-private bool core_self_shutdown_requested = false;
+private bool inject_self_shutdown_requested = false;
 // GLib source id of the boot poll (0 = not running); see maybe_watch_boot.
 private uint boot_timer = 0;
 // Cached process→agents map rebuilt on each plan reload so that
@@ -73,19 +73,20 @@ public async void run() {
     // absent or fails signature verification (atomic-apply-rollback).
     this.ota.recover_manifest();
     if (!yield verify_self()) {
-        // OTA: a DEGRADED restart with a pending core switch rolls back to the
-        // previous binary instead of staying degraded (ota-core-selfupdate). If
-        // there is no .prev rollback target, stay DEGRADED rather than exec a
-        // known-bad binary with no rollback target.
-        if (this.ota.core_switch_pending()) {
-            if (this.ota.rollback_core_switch()) {
+        // OTA: a DEGRADED restart with a pending inject switch rolls back to
+        // the previous binary instead of staying degraded
+        // (ota-core-selfupdate). If there is no .prev rollback target, stay
+        // DEGRADED rather than exec a known-bad binary with no rollback
+        // target.
+        if (this.ota.inject_switch_pending()) {
+            if (this.ota.rollback_inject_switch()) {
                 Log.err("supervisor",
-                        "DEGRADED after core switch; rolling back and exiting");
+                        "DEGRADED after inject switch; rolling back and exiting");
                 Posix.kill(Posix.getpid(), Posix.Signal.TERM);
                 return;
             }
             Log.err("supervisor",
-                    "DEGRADED after core switch; no .prev rollback target");
+                    "DEGRADED after inject switch; no .prev rollback target");
         }
         this.state = DaemonState.DEGRADED;
         this.status.daemon_state = "degraded";
@@ -98,10 +99,10 @@ public async void run() {
     this.state = DaemonState.READY;
     this.status.daemon_state = "ready";
     this.status.manifest_version = this.manifest.manifest_version;
-    // OTA: a READY restart confirms a pending core switch (clear marker,
+    // OTA: a READY restart confirms a pending inject switch (clear marker,
     // remove .prev) — ota-core-selfupdate "Ready restart confirms".
-    if (this.ota.core_switch_pending()) {
-        this.ota.confirm_core_switch();
+    if (this.ota.inject_switch_pending()) {
+        this.ota.confirm_inject_switch();
     }
     Log.ok("supervisor", "READY");
 
@@ -160,13 +161,13 @@ public async void run() {
         Log.err("supervisor", "watcher start: " + e.message);
     }
 
-    // OTA: apply a staged core APK update before the first injection so the
+    // OTA: apply a staged inject APK update before the first injection so the
     // first injection uses the new binary's embedded agent set
     // (ota-core-selfupdate "before the first injection").
-    yield apply_staged_core_apk();
-    // A staged core apply requested a self-shutdown (init restart): do not
+    yield apply_staged_inject_update();
+    // A staged inject apply requested a self-shutdown (init restart): do not
     // begin an injection cycle that the pending SIGTERM teardown discards.
-    if (this.core_self_shutdown_requested) {
+    if (this.inject_self_shutdown_requested) {
         return;
     }
 
@@ -260,11 +261,11 @@ private void wire_events() {
                 load_plan();
                 apply_plan_diff.begin();
             });
-    // OTA: a staged core APK update is re-verified with the embedded key and
+    // OTA: a staged inject APK update is re-verified with the embedded key and
     // applied here. Staged content stays untrusted until the Ota module
     // re-verifies it (app-interface "Staging read boundary").
-    this.app_watcher.core_update_ready.connect(() => {
-                apply_staged_core_apk.begin();
+    this.app_watcher.inject_update_ready.connect(() => {
+                apply_staged_inject_update.begin();
             });
 }
 
@@ -808,27 +809,28 @@ private void write_status_safe() {
     }
 }
 
-// OTA: apply a staged core APK update from the app-zone staging/ dir
+// OTA: apply a staged inject APK update from the app-zone staging/ dir
 // (ota-core-selfupdate). The daemon re-verifies the staged APK's embedded
 // manifest against EMBEDDED_PUBKEY, self-replaces the running binary, and
 // self-shuts down so init restarts the new binary. The marker is consumed
-// BEFORE the apply (single-use, design D4) inside apply_core_apk_update, so a
+// BEFORE the apply (single-use, design D4) inside apply_inject_update, so a
 // successful self-replace + init-restart does not crash-loop. Staged content
 // stays untrusted until the Ota module re-verifies it (app-interface "Staging
 // read boundary"). Reached from the boot early-apply path (before the first
-// injection) and the runtime core_update_ready signal handler.
-private async void apply_staged_core_apk() {
+// injection) and the runtime inject_update_ready signal handler.
+private async void apply_staged_inject_update() {
     string staging = Path.build_filename(this.app_zone, "staging");
-    // Gate on the core-update-ready marker (the producer's "a verified daemon
-    // APK is staged" signal). apply_core_apk_update consumes it first.
-    if (!this.ota.core_update_ready(staging)) {
+    // Gate on the voboost-inject-update-ready marker (the producer's "a
+    // verified daemon APK is staged" signal). apply_inject_update consumes it
+    // first.
+    if (!this.ota.inject_update_ready(staging)) {
         return;
     }
-    var res = this.ota.apply_core_apk_update(staging);
-    if (res == CoreApplyOutcome.APPLIED) {
+    var res = this.ota.apply_inject_update(staging);
+    if (res == InjectApplyOutcome.APPLIED) {
         Log.ok("supervisor",
-               "core APK applied; self-shutdown for init restart");
-        this.core_self_shutdown_requested = true;
+               "inject APK applied; self-shutdown for init restart");
+        this.inject_self_shutdown_requested = true;
         write_status_safe();
         // Raise SIGTERM: the installed handler performs the clean teardown
         // (detach sessions, resume pending spawns, release the pidfile lock)
@@ -836,7 +838,7 @@ private async void apply_staged_core_apk() {
         // binary (ota "Init hook restarts the daemon on exit").
         Posix.kill(Posix.getpid(), Posix.Signal.TERM);
     } else {
-        Log.err("supervisor", "core APK apply rejected: %d".printf((int) res));
+        Log.err("supervisor", "inject APK apply rejected: %d".printf((int) res));
     }
 }
 

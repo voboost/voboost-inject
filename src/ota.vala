@@ -1,7 +1,7 @@
 namespace Voboost {
 // One entry of a verified release manifest (release-manifest spec). Held only
 // after the manifest's detached signature verifies against the embedded key and
-// its size/entry bounds hold. The release manifest lists APKs (one core entry
+// its size/entry bounds hold. The release manifest lists APKs (one inject entry
 // for the daemon APK); it is the OTA client's trust source for the APK
 // size+sha256 before staging. The daemon re-verifies the staged APK's embedded
 // manifest (not the release manifest) at apply time.
@@ -28,14 +28,14 @@ public ReleaseManifest() {
     this.files = new GenericArray<ReleaseFile>();
 }
 
-// Find the core-channel entry matching a basename. The release manifest lists
-// APKs; the core entry is the daemon APK. Non-core entries never satisfy a
-// core lookup even if their path collides (defense-in-depth, release-manifest
-// spec).
-public ReleaseFile? find_core(string basename) {
+// Find the inject-channel entry matching a basename. The release manifest lists
+// APKs; the inject entry is the daemon APK. Non-inject entries never satisfy an
+// inject lookup even if their path collides (defense-in-depth,
+// release-manifest spec).
+public ReleaseFile? find_inject(string basename) {
     for (uint i = 0; i < this.files.length; i++) {
         var f = this.files[i];
-        if (f.channel == "core" && f.path == basename) {
+        if (f.channel == "inject" && f.path == basename) {
             return f;
         }
     }
@@ -43,12 +43,12 @@ public ReleaseFile? find_core(string basename) {
 }
 }
 
-// Result of Ota.apply_core_apk_update. APPLIED means the caller MUST perform a
+// Result of Ota.apply_inject_update. APPLIED means the caller MUST perform a
 // clean self-shutdown so Android init restarts the service on the new binary;
 // the running binary is never replaced in place (it is renamed aside to .prev
 // and the new binary installed at the same pathname). Every REJECTED_* leaves
 // the current binary active and unchanged.
-public enum CoreApplyOutcome {
+public enum InjectApplyOutcome {
     APPLIED,
     REJECTED_NO_APK,
     REJECTED_BAD_MANIFEST,
@@ -59,7 +59,7 @@ public enum CoreApplyOutcome {
     REJECTED_NO_ROLLBACK;
 }
 
-// APK-level core self-update (ota-core-selfupdate change). Frida-free file-
+// APK-level inject self-update (ota-core-selfupdate change). Frida-free file-
 // system logic; the daemon (Supervisor) triggers it and performs the
 // self-shutdown / re-inject.
 //
@@ -71,7 +71,7 @@ public enum CoreApplyOutcome {
 //   manifest.json.prev + manifest.sig.prev one-deep rollback copy
 //   voboost-inject                        the daemon binary init execs
 //   voboost-inject.prev                   the previous binary, kept for rollback
-//   run/core-switch-pending              marker set after a self-replace
+//   run/voboost-inject-switch-pending     marker set after a self-replace
 //
 // The app zone staging/ dir is UNTRUSTED: the staged APK is re-verified by the
 // daemon (its embedded manifest.json+.sig against EMBEDDED_PUBKEY) before any
@@ -100,13 +100,13 @@ private const string MANIFEST = "manifest.json";
 private const string MANIFEST_SIG = "manifest.sig";
 private const string MANIFEST_PREV = "manifest.json.prev";
 private const string MANIFEST_SIG_PREV = "manifest.sig.prev";
-private const string CORE_BINARY = "voboost-inject";
-private const string CORE_PREV = "voboost-inject.prev";
-private const string CORE_MARKER = "run/core-switch-pending";
+private const string INJECT_BINARY = "voboost-inject";
+private const string INJECT_PREV = "voboost-inject.prev";
+private const string INJECT_MARKER = "run/voboost-inject-switch-pending";
 // The producer's "a verified daemon APK is staged" marker, created last in
 // the app-zone staging/ dir. Lives in the app zone but the daemon (root)
 // owns its lifecycle as the consumer. Single-use (design D4).
-private const string CORE_UPDATE_READY = "core-update-ready";
+private const string INJECT_UPDATE_READY = "voboost-inject-update-ready";
 // The fixed asset path of the daemon ELF inside the APK (design D5 open
 // question, pinned by the daemon APK build). The ZIP reader locates it by
 // this name; the build MUST place the raw ELF here.
@@ -121,23 +121,23 @@ public Ota(string root_zone, TrustStore trust) {
 // True when the producer signalled a verified staged daemon APK. The daemon
 // applies only while this is present (ota-core-selfupdate staging contract)
 // and consumes it BEFORE the apply, so a successful self-replace + init
-// restart is not re-applied on every boot — which would crash-loop the core
+// restart is not re-applied on every boot — which would crash-loop the inject
 // plane via self-shutdown + init restart.
-public bool core_update_ready(string staging_dir) {
+public bool inject_update_ready(string staging_dir) {
     return FileUtils.test(
-        Path.build_filename(staging_dir, CORE_UPDATE_READY),
+        Path.build_filename(staging_dir, INJECT_UPDATE_READY),
         FileTest.EXISTS);
 }
 
 // Remove the marker. Called BEFORE the apply (design D4: single-use, consume
 // first). Best-effort: an unlink failure only means the next boot re-checks
-// core_update_ready and (for an identical verified APK) the apply runs again
-// — the core plane consumes it before its self-shutdown, where it must
+// inject_update_ready and (for an identical verified APK) the apply runs again
+// — the inject plane consumes it before its self-shutdown, where it must
 // succeed for the loop to be broken, and it does (same dir just read, root
 // perms).
-public void consume_core_update_ready(string staging_dir) {
+public void consume_inject_update_ready(string staging_dir) {
     FileUtils.unlink(
-        Path.build_filename(staging_dir, CORE_UPDATE_READY));
+        Path.build_filename(staging_dir, INJECT_UPDATE_READY));
 }
 
 // Verify + parse a release manifest. Returns null on a bad signature, malformed
@@ -191,7 +191,7 @@ public ReleaseManifest? verify_release_manifest(
         string sha = safe_string(f, "sha256");
         string ver = safe_string(f, "version");
         if (path == "" || sha == "" || ver == ""
-            || (channel != "agents" && channel != "core"
+            || (channel != "agents" && channel != "inject"
                 && channel != "app")
             || !f.has_member("size")) {
             return null;
@@ -246,42 +246,43 @@ public bool recover_manifest() {
     return true;
 }
 
-// Apply a staged core APK update (ota-core-selfupdate). The marker is
+// Apply a staged inject APK update (ota-core-selfupdate). The marker is
 // consumed FIRST (single-use, design D4), then the staged APK is found, its
 // embedded manifest.json+.sig re-verified against EMBEDDED_PUBKEY (design
 // D1), the daemon ELF binary extracted from the APK (design D5), and the
 // running binary atomically self-replaced (rename aside to .prev, install
-// the new binary at the same pathname, design D2). The core-switch-pending
-// marker is written and the caller self-shuts down so init restarts the new
-// binary. On any REJECTED_* the current binary stays active (the marker is
-// already consumed — the bad APK is dropped, not retried every boot).
-public CoreApplyOutcome apply_core_apk_update(string staging_dir) {
+// the new binary at the same pathname, design D2). The
+// voboost-inject-switch-pending marker is written and the caller self-shuts
+// down so init restarts the new binary. On any REJECTED_* the current binary
+// stays active (the marker is already consumed — the bad APK is dropped, not
+// retried every boot).
+public InjectApplyOutcome apply_inject_update(string staging_dir) {
     // Consume the marker BEFORE the apply (design D4): a successful
     // self-replace + self-shutdown + init-restart must not re-apply the same
     // APK on every boot (crash-loop). The marker is the trigger, not part of
     // the verified set, so consuming it first is safe.
-    consume_core_update_ready(staging_dir);
-    string apk = find_staged_apk(staging_dir);
+    consume_inject_update_ready(staging_dir);
+    string apk = find_staged_inject(staging_dir);
     if (apk == null) {
         Log.err("ota", "no staged daemon APK in staging/");
-        return CoreApplyOutcome.REJECTED_NO_APK;
+        return InjectApplyOutcome.REJECTED_NO_APK;
     }
     // DoS guard: reject an oversized APK before reading it into memory.
     Posix.Stat st;
     if (Posix.stat(apk, out st) != 0 || st.st_size > MAX_APK_BYTES) {
         Log.err("ota", "staged APK oversize/absent");
-        return CoreApplyOutcome.REJECTED_NO_APK;
+        return InjectApplyOutcome.REJECTED_NO_APK;
     }
     uint8[] apk_bytes;
     try {
         FileUtils.get_data(apk, out apk_bytes);
     } catch (Error e) {
         Log.err("ota", "staged APK read: " + e.message);
-        return CoreApplyOutcome.REJECTED_NO_APK;
+        return InjectApplyOutcome.REJECTED_NO_APK;
     }
     if (apk_bytes.length > MAX_APK_BYTES) {
         Log.err("ota", "staged APK grew past bound");
-        return CoreApplyOutcome.REJECTED_NO_APK;
+        return InjectApplyOutcome.REJECTED_NO_APK;
     }
     // Re-verify the APK's embedded manifest against EMBEDDED_PUBKEY (design
     // D1). The APK's own Android signature is NOT verified here.
@@ -289,94 +290,94 @@ public CoreApplyOutcome apply_core_apk_update(string staging_dir) {
     uint8[] s_bytes = new uint8[0];
     if (!extract_apk_entry(apk_bytes, APK_MANIFEST_ENTRY, out m_bytes)) {
         Log.err("ota", "staged APK missing embedded manifest entry");
-        return CoreApplyOutcome.REJECTED_BAD_MANIFEST;
+        return InjectApplyOutcome.REJECTED_BAD_MANIFEST;
     }
     if (!extract_apk_entry(
             apk_bytes, APK_MANIFEST_SIG_ENTRY, out s_bytes)) {
         Log.err("ota", "staged APK missing embedded manifest.sig entry");
-        return CoreApplyOutcome.REJECTED_BAD_MANIFEST;
+        return InjectApplyOutcome.REJECTED_BAD_MANIFEST;
     }
     var embedded = new Manifest();
     if (!embedded.load_verified(m_bytes, s_bytes, this.trust)) {
         Log.err("ota", "staged APK embedded manifest rejected");
-        return CoreApplyOutcome.REJECTED_BAD_MANIFEST;
+        return InjectApplyOutcome.REJECTED_BAD_MANIFEST;
     }
     // Extract the daemon ELF binary from the APK.
     uint8[] bin_bytes;
     if (!extract_apk_entry(apk_bytes, APK_BINARY_ENTRY, out bin_bytes)) {
         Log.err("ota", "staged APK missing daemon binary entry");
-        return CoreApplyOutcome.REJECTED_BAD_BINARY;
+        return InjectApplyOutcome.REJECTED_BAD_BINARY;
     }
     if (bin_bytes.length == 0) {
         Log.err("ota", "staged APK daemon binary is empty");
-        return CoreApplyOutcome.REJECTED_BAD_BINARY;
+        return InjectApplyOutcome.REJECTED_BAD_BINARY;
     }
     // Install the new binary as a root-zone temp, fsync, fchmod 0755.
-    string tmp = Path.build_filename(this.root_zone, ".ota.core.tmp");
+    string tmp = Path.build_filename(this.root_zone, ".ota.inject.tmp");
     if (!write_bytes_exec(tmp, bin_bytes)) {
-        Log.err("ota", "core install write failed");
+        Log.err("ota", "inject install write failed");
         FileUtils.unlink(tmp);
-        return CoreApplyOutcome.REJECTED_BAD_BINARY;
+        return InjectApplyOutcome.REJECTED_BAD_BINARY;
     }
     // Preserve the previous binary as .prev for rollback (design D3). rename
     // of the running binary is safe on Linux/Android: the running process
     // keeps its inode until exit. Aborts if the previous binary cannot be
     // preserved: a switch with no rollback target must never proceed.
-    string stable = Path.build_filename(this.root_zone, CORE_BINARY);
-    string prev = Path.build_filename(this.root_zone, CORE_PREV);
+    string stable = Path.build_filename(this.root_zone, INJECT_BINARY);
+    string prev = Path.build_filename(this.root_zone, INJECT_PREV);
     if (!preserve_previous_binary(stable, prev)) {
-        Log.err("ota", "cannot preserve previous core; aborting switch");
+        Log.err("ota", "cannot preserve previous inject; aborting switch");
         FileUtils.unlink(tmp);
-        return CoreApplyOutcome.REJECTED_NO_ROLLBACK;
+        return InjectApplyOutcome.REJECTED_NO_ROLLBACK;
     }
     // The marker MUST land before the new binary takes the pathname: it is
     // the rollback trigger on a DEGRADED restart. Without it the switch is
     // not safe to activate.
     if (!write_marker()) {
-        Log.err("ota", "cannot write core-switch marker; aborting switch");
+        Log.err("ota", "cannot write inject-switch marker; aborting switch");
         restore_previous_binary(stable, prev);
         FileUtils.unlink(tmp);
-        return CoreApplyOutcome.REJECTED_NO_ROLLBACK;
+        return InjectApplyOutcome.REJECTED_NO_ROLLBACK;
     }
     // Install the new binary at the stable pathname (atomic rename). This is
     // the commit step: the running process keeps its old inode; the next exec
     // (by init after the self-shutdown) resolves the new binary.
     if (FileUtils.rename(tmp, stable) != 0) {
-        Log.err("ota", "core install rename failed; aborting switch");
-        FileUtils.unlink(Path.build_filename(this.root_zone, CORE_MARKER));
+        Log.err("ota", "inject install rename failed; aborting switch");
+        FileUtils.unlink(Path.build_filename(this.root_zone, INJECT_MARKER));
         restore_previous_binary(stable, prev);
         FileUtils.unlink(tmp);
-        return CoreApplyOutcome.REJECTED_BAD_BINARY;
+        return InjectApplyOutcome.REJECTED_BAD_BINARY;
     }
-    Log.ok("ota", "core self-updated -> " + stable);
-    return CoreApplyOutcome.APPLIED;
+    Log.ok("ota", "inject self-updated -> " + stable);
+    return InjectApplyOutcome.APPLIED;
 }
 
-public bool core_switch_pending() {
+public bool inject_switch_pending() {
     return FileUtils.test(
-        Path.build_filename(this.root_zone, CORE_MARKER), FileTest.EXISTS);
+        Path.build_filename(this.root_zone, INJECT_MARKER), FileTest.EXISTS);
 }
 
-// Confirm a successful core switch: clear the marker and remove .prev (the
+// Confirm a successful inject switch: clear the marker and remove .prev (the
 // previous binary is no longer needed). atomic-apply-rollback "Ready restart
 // confirms the switch".
-public void confirm_core_switch() {
-    string marker = Path.build_filename(this.root_zone, CORE_MARKER);
+public void confirm_inject_switch() {
+    string marker = Path.build_filename(this.root_zone, INJECT_MARKER);
     FileUtils.unlink(marker);
-    FileUtils.unlink(Path.build_filename(this.root_zone, CORE_PREV));
+    FileUtils.unlink(Path.build_filename(this.root_zone, INJECT_PREV));
 }
 
-// Roll back a failed core switch: restore .prev over the bad new binary and
+// Roll back a failed inject switch: restore .prev over the bad new binary and
 // clear the marker. Caller self-shuts down so init restarts the previous
 // binary. atomic-apply-rollback "Degraded restart rolls back". If .prev is
 // absent (first-update edge, or power-loss between the rename and the marker
 // write) the daemon cannot restore and stays DEGRADED rather than exec a
 // known-bad binary with no rollback target.
-public bool rollback_core_switch() {
-    string marker = Path.build_filename(this.root_zone, CORE_MARKER);
+public bool rollback_inject_switch() {
+    string marker = Path.build_filename(this.root_zone, INJECT_MARKER);
     FileUtils.unlink(marker);
-    string stable = Path.build_filename(this.root_zone, CORE_BINARY);
-    string prev = Path.build_filename(this.root_zone, CORE_PREV);
+    string stable = Path.build_filename(this.root_zone, INJECT_BINARY);
+    string prev = Path.build_filename(this.root_zone, INJECT_PREV);
     if (!FileUtils.test(prev, FileTest.EXISTS)) {
         Log.err("ota", "no .prev rollback target; staying DEGRADED");
         return false;
@@ -386,7 +387,7 @@ public bool rollback_core_switch() {
         Log.err("ota", "rollback rename failed");
         return false;
     }
-    Log.ok("ota", "core rolled back -> " + stable);
+    Log.ok("ota", "inject rolled back -> " + stable);
     return true;
 }
 
@@ -412,7 +413,7 @@ private bool manifest_verifies(string path, string sig_path) {
 // Find the staged daemon APK in staging/. The producer stages it under a
 // fixed name; return its path or null. (The producer contract: exactly one
 // daemon APK named voboost-inject.apk in staging/.)
-private string? find_staged_apk(string staging_dir) {
+private string? find_staged_inject(string staging_dir) {
     string apk = Path.build_filename(staging_dir, "voboost-inject.apk");
     if (FileUtils.test(apk, FileTest.EXISTS)) {
         return apk;
@@ -464,13 +465,13 @@ private bool write_bytes_exec(string dst, uint8[] data) {
     return true;
 }
 
-// Durably write the core-switch marker. Returns false on any IO failure (the
+// Durably write the inject-switch marker. Returns false on any IO failure (the
 // caller aborts the switch: without a marker a DEGRADED restart cannot roll
 // back, so the switch must not proceed).
 private bool write_marker() {
     string run_dir = Path.build_filename(this.root_zone, "run");
     DirUtils.create_with_parents(run_dir, 0700);
-    string marker = Path.build_filename(this.root_zone, CORE_MARKER);
+    string marker = Path.build_filename(this.root_zone, INJECT_MARKER);
     string tmp = Path.build_filename(run_dir, ".ota.marker.tmp");
     try {
         FileUtils.set_contents(tmp, "pending");

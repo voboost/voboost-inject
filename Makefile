@@ -212,9 +212,9 @@ sign:
 	openssl pkeyutl -sign -inkey "$(KEY)" -rawin -in "$(FILE)" -out "$(FILE).sig"
 	@echo "Signed $(FILE) -> $(FILE).sig"
 
-.PHONY: core-apk
+.PHONY: inject-apk
 
-# Build the daemon core APK (ota-core-selfupdate contract). Packages the
+# Build the daemon inject APK (ota-core-selfupdate contract). Packages the
 # stripped daemon binary + the signed per-agent manifest into a ZIP named
 # voboost-inject.apk with the fixed asset entries the daemon's ZIP reader
 # expects: assets/manifest.json, assets/manifest.sig, assets/voboost-inject
@@ -232,13 +232,13 @@ sign:
 # reader can parse (mirrors test/fixtures/gen-fixtures.sh). Entries are stored
 # uncompressed (method 0) so the reader's stored path is exercised; the daemon
 # also supports deflated entries (method 8) via its streaming inflater.
-core-apk:
-	@test -n "$(BINARY)"       || { echo "core-apk: BINARY=<daemon-elf> required"          >&2; exit 2; }
-	@test -n "$(MANIFEST)"     || { echo "core-apk: MANIFEST=<manifest.json> required"     >&2; exit 2; }
-	@test -n "$(MANIFEST_SIG)" || { echo "core-apk: MANIFEST_SIG=<manifest.json.sig> required" >&2; exit 2; }
-	@test -f "$(BINARY)"       || { echo "core-apk: BINARY $(BINARY) not found"             >&2; exit 2; }
-	@test -f "$(MANIFEST)"     || { echo "core-apk: MANIFEST $(MANIFEST) not found"         >&2; exit 2; }
-	@test -f "$(MANIFEST_SIG)" || { echo "core-apk: MANIFEST_SIG $(MANIFEST_SIG) not found" >&2; exit 2; }
+inject-apk:
+	@test -n "$(BINARY)"       || { echo "inject-apk: BINARY=<daemon-elf> required"          >&2; exit 2; }
+	@test -n "$(MANIFEST)"     || { echo "inject-apk: MANIFEST=<manifest.json> required"     >&2; exit 2; }
+	@test -n "$(MANIFEST_SIG)" || { echo "inject-apk: MANIFEST_SIG=<manifest.json.sig> required" >&2; exit 2; }
+	@test -f "$(BINARY)"       || { echo "inject-apk: BINARY $(BINARY) not found"             >&2; exit 2; }
+	@test -f "$(MANIFEST)"     || { echo "inject-apk: MANIFEST $(MANIFEST) not found"         >&2; exit 2; }
+	@test -f "$(MANIFEST_SIG)" || { echo "inject-apk: MANIFEST_SIG $(MANIFEST_SIG) not found" >&2; exit 2; }
 	@out="$(OUT)"; [ -n "$$out" ] || out=build/voboost-inject.apk; \
 	mkdir -p "$$(dirname "$$out")"; \
 	python3 -c 'import sys, zipfile; out,binary,manifest,sig=sys.argv[1:5]; \
@@ -247,7 +247,7 @@ z.write(manifest,"assets/manifest.json"); \
 z.write(sig,"assets/manifest.sig"); \
 z.write(binary,"assets/voboost-inject"); z.close(); \
 print("Wrote "+out)' "$$out" "$(BINARY)" "$(MANIFEST)" "$(MANIFEST_SIG)"
-	@echo "Core APK built"
+	@echo "Inject APK built"
 
 verify-sig:
 	@test -n "$(KEY)"  || { echo "verify-sig: KEY=<public.pem> required" >&2; exit 2; }
@@ -260,16 +260,16 @@ verify-sig:
 # OTA release-manifest generator (owned by the ota-core-selfupdate change).
 # APK-level: scans DIR for APKs, labels every entry with CHANNEL, stamps
 # VERSION, and emits unsigned build/release-manifest.json with per-APK
-# path/channel/sha256/size/version. This repo's CI emits only the `core` channel
-# (the daemon APK, a single entry); the `agents`/`app` channels are produced by
-# the voboost app repo. Signing is the existing `make sign` (the ci release
-# workflow calls both); the OTA client verifies the signed manifest, and the
-# daemon re-verifies the staged APK's embedded manifest (not the release
-# manifest) at apply time. stat is probed both ways (Linux -c%s, macOS -f%z)
-# so it runs locally and in CI.
+# path/channel/sha256/size/version. This repo's CI emits only the `inject`
+# channel (the daemon APK, a single entry); the `agents`/`app` channels are
+# produced by the voboost app repo. Signing is the existing `make sign` (the
+# ci release workflow calls both); the OTA client verifies the signed manifest,
+# and the daemon re-verifies the staged APK's embedded manifest (not the
+# release manifest) at apply time. stat is probed both ways (Linux -c%s,
+# macOS -f%z) so it runs locally and in CI.
 release-manifest:
 	@test -n "$(DIR)"     || { echo "release-manifest: DIR=<release-dir> required"         >&2; exit 2; }
-	@test -n "$(CHANNEL)" || { echo "release-manifest: CHANNEL=<agents|core|app> required"  >&2; exit 2; }
+	@test -n "$(CHANNEL)" || { echo "release-manifest: CHANNEL=<agents|inject|app> required"  >&2; exit 2; }
 	@test -n "$(VERSION)" || { echo "release-manifest: VERSION=<semver> required"           >&2; exit 2; }
 	@test -d "$(DIR)"     || { echo "release-manifest: DIR $(DIR) is not a directory"       >&2; exit 2; }
 	@mkdir -p build; out=build/release-manifest.json; \
@@ -299,7 +299,7 @@ release-manifest:
 # /system, the operator runs this on-device via adb to restore the guarded
 # init-hook block that launches /data/voboost/voboost-inject. Idempotent: a hook
 # that already contains the block is left untouched. HOOK=<on-device path>.
-# Requires root (/system remounted RW). The restart-on-exit behavior the core
+# Requires root (/system remounted RW). The restart-on-exit behavior the inject
 # update depends on is set up by initial device provisioning (out of scope); this
 # step only restores the launch of the stable path.
 device-rearm:

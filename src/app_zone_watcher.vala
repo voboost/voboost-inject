@@ -1,6 +1,6 @@
 namespace Voboost {
-// GFileMonitor on inject.json and staging/core-update-ready, with debounce.
-// Emits plan_changed / core_update_ready. The watched zone is untrusted input;
+// GFileMonitor on inject.json and staging/voboost-inject-update-ready, with debounce.
+// Emits plan_changed / inject_update_ready. The watched zone is untrusted input;
 // verification happens downstream. See app-interface#Untrusted plan input
 // and #Staging read boundary.
 public class AppZoneWatcher : Object {
@@ -15,7 +15,7 @@ public string run_zone { get; construct; }
 public uint debounce_ms { get; construct; }
 
 public signal void plan_changed();
-public signal void core_update_ready();
+public signal void inject_update_ready();
 // Fired when the run/disable kill-switch file is created or deleted.
 // The supervisor re-evaluates kill_switched() and runs apply_plan_diff
 // (which handles both activation and deactivation).
@@ -127,8 +127,8 @@ private void ensure_staging_monitor() {
     this.staging_mon.changed.connect((file, other, ev) => {
                 string? name = file != null ? file.get_basename() : null;
                 string? oname = other != null ? other.get_basename() : null;
-                if (name == "core-update-ready"
-                    || oname == "core-update-ready") {
+                if (name == "voboost-inject-update-ready"
+                    || oname == "voboost-inject-update-ready") {
                     schedule_staging();
                 }
             });
@@ -136,7 +136,7 @@ private void ensure_staging_monitor() {
     // monitor existed), no creation event fires — check once. schedule_staging
     // debounces, so a racing event is harmless.
     if (FileUtils.test(
-            Path.build_filename(staging_path, "core-update-ready"),
+            Path.build_filename(staging_path, "voboost-inject-update-ready"),
             FileTest.EXISTS)) {
         schedule_staging();
     }
@@ -159,7 +159,7 @@ private void schedule_staging() {
     }
     this.staging_timer = Timeout.add(this.debounce_ms, () => {
                 this.staging_timer = 0;
-                core_update_ready();
+                inject_update_ready();
                 return Source.REMOVE;
             });
 }
