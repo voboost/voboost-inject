@@ -33,7 +33,7 @@ project(
     'frida-core:portal=disabled',
     'frida-core:inject=disabled',
     'frida-core:gadget=disabled',
-    'frida-core:compat=disabled',
+    'frida-core:compat=auto',
     'frida-core:tests=disabled',
     'frida-core:assets=embedded',
     'frida-gum:v8=disabled',
