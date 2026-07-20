@@ -25,11 +25,11 @@
 
 ## 3. Validate + build
 
-- [ ] 3.1 `npx @fission-ai/openspec validate enable-32bit-process-support --strict`
+- [x] 3.1 `npx @fission-ai/openspec validate enable-32bit-process-support --strict`
       passes
-- [ ] 3.2 `make build` (host) compiles — no Vala change, option is cross-only
-- [ ] 3.3 `make build-android` produces a binary with `frida-helper-32` present
+- [x] 3.2 `make build` (host) compiles — no Vala change, option is cross-only
+- [x] 3.3 `make build-android` produces a binary with `frida-helper-32` present
       (size ~24 MB; optional — long build, needs NDK r29)
-- [ ] 3.4 On-device: agents routed at 32-bit processes (e.g.
+- [x] 3.4 On-device: agents routed at 32-bit processes (e.g.
       `pedestrian-warning` at `com.qinggan.systemservice`) reach
       `state: active` — verified earlier on the car (see `CURRENT.md`)

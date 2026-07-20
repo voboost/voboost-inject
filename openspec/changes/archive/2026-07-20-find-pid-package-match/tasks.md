@@ -16,9 +16,9 @@
 
 ## 3. Validate
 
-- [ ] 3.1 `npx @fission-ai/openspec validate find-pid-package-match --strict`
+- [x] 3.1 `npx @fission-ai/openspec validate find-pid-package-match --strict`
       passes
-- [ ] 3.2 `make build`, `make test`, `make lint` pass (host)
-- [ ] 3.3 `make build-android` passes
-- [ ] 3.4 Emulator: a running app target resolves to a pid and injects
+- [x] 3.2 `make build`, `make test`, `make lint` pass (host)
+- [x] 3.3 `make build-android` passes
+- [x] 3.4 Emulator: a running app target resolves to a pid and injects
       (`state: active`), e.g. `attach-launcher` with the launcher-echo fixture

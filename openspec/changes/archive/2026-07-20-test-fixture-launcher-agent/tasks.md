@@ -18,8 +18,8 @@
 
 ## 3. Validate
 
-- [ ] 3.1 `npx @fission-ai/openspec validate test-fixture-launcher-agent --strict`
+- [x] 3.1 `npx @fission-ai/openspec validate test-fixture-launcher-agent --strict`
       passes
-- [ ] 3.2 `make test` passes (host — agents lookup by id, count-independent)
-- [ ] 3.3 Emulator: provision the new manifest+agent, `attach-launcher` reaches
+- [x] 3.2 `make test` passes (host — agents lookup by id, count-independent)
+- [x] 3.3 Emulator: provision the new manifest+agent, `attach-launcher` reaches
       `state: active` (with the `find-pid-package-match` fix)

@@ -90,17 +90,26 @@ subproject options pinned explicitly rather than left to frida defaults:
 `frida-gum:v8=disabled` (gum's `v8` option defaults to `auto` with a v8 wrap available, so
 QuickJS-only must be pinned, not assumed; QuickJS stays enabled by gum's default),
 `frida-core:default_library=static`, `frida-core:frida_version` supplied (the wrap checkout has no
-`releng` submodule to compute it), only the local backend enabled, and frida-core's bundled
-tools/tests/compat helpers disabled. Configuring the subproject SHALL use the frida-patched Vala
-compiler (`valac` version suffix `-frida`, provisioned by `make init` — see provisioning) and
-meson >= 1.1.0 (frida-core's floor); the root `meson.build` SHALL declare that `meson_version`
-floor. Dependency wiring SHALL be an explicit `subproject('frida-core')` plus
+`releng` submodule to compute it), only the local backend enabled, frida-core's bundled
+tools/tests disabled, and `frida-core:compat=auto` so frida's 32-bit helper
+(`frida-helper-32`) and the armv7 `frida-agent.so` are linked into the daemon ELF — the target
+device runs a mix of 64-bit and 32-bit (armv7) processes, and the daemon must be able to inject
+into the 32-bit ones (see `32bit-target-support`). Configuring the subproject SHALL use the
+frida-patched Vala compiler (`valac` version suffix `-frida`, provisioned by `make init` — see
+provisioning) and meson >= 1.1.0 (frida-core's floor); the root `meson.build` SHALL declare that
+`meson_version` floor. Dependency wiring SHALL be an explicit `subproject('frida-core')` plus
 `dependency('frida-core-1.0', static: true)` resolved via frida-core's `meson.override_dependency`.
 
 #### Scenario: frida-core is built
 - **WHEN** the daemon is built
 - **THEN** frida-core is compiled from the provisioned `subprojects/` wrap with the QuickJS engine
   and V8 disabled, and linked statically
+
+#### Scenario: 32-bit helper is built into the device binary
+- **WHEN** `make build-android` runs the Android cross build
+- **THEN** the daemon ELF embeds frida's 32-bit helper (`frida-helper-32` and the armv7
+  `frida-agent.so`) because `frida-core:compat=auto`, and the daemon can inject into 32-bit
+  (armv7) target processes on a mixed-ABI device
 
 #### Scenario: Toolchain is the patched valac
 - **WHEN** `meson setup` configures the build after `make init`
@@ -182,4 +191,62 @@ is not found.
   has no `toolchains/llvm/prebuilt/*/bin`
 - **THEN** it fails with `build-android: NDK toolchain not found` (exit 1), before
   invoking meson
+
+### Requirement: Android frida-agent .so keeps a Bionic-loadable hash table
+
+The Android cross-build of the frida agent SHALL link the raw agent with
+`-Wl,--hash-style=sysv` so the final `frida-agent-64.so` (after frida-core's
+`post_process` runs `termux-elf-cleaner`) retains a `DT_HASH` section the Bionic
+linker can resolve symbols from at `dlopen`. The NDK default (`--hash-style=gnu`)
+emits only `.gnu.hash`, which termux-elf-cleaner strips, leaving a hashless .so
+that Bionic rejects with `empty/missing DT_HASH/DT_GNU_HASH`. The patch SHALL be
+persisted via `subprojects/frida-core.wrap` `diff_files` so clean clones apply it.
+
+#### Scenario: Final agent carries DT_HASH
+- **WHEN** `make build-android` produces the embedded `frida-agent-64.so`
+- **THEN** `llvm-readelf -d` on it lists `DT_HASH` (the cleaner stripped any
+  `.gnu.hash` but left the SysV `.hash`)
+
+#### Scenario: Target injection loads the agent
+- **WHEN** the daemon injects an agent into a spawned/attached target on an
+  Android emulator (API 28)
+- **THEN** `dlopen` of the agent succeeds (no `empty/missing DT_HASH/DT_GNU_HASH`),
+  the agent loads, and `inject-status.json` reports `state: active`
+
+#### Scenario: Patch applies after the libc-shim patch
+- **WHEN** a clean clone fetches frida-core and applies the wrap `diff_files`
+- **THEN** the `--hash-style=sysv` patch applies after the libc-shim patch
+  (both touch the Android `if host_os == 'android'` block in
+  `lib/agent/meson.build`) and the build configures without conflict
+
+### Requirement: All meson build-dir commands in the Makefile use frida's meson
+
+Every `make` target that runs a meson command over the build dir SHALL invoke frida's own meson.
+
+This covers `setup`, `test`, and any future `compile`/`install`/`reconfigure`
+wrapper — every meson command that pickle-loads the build dir. They SHALL use
+`$(PYTHON_FOR_MESON) $(FRIDA_MESON)`, the same fork that `setup` used to write
+`build/meson-private/coredata.dat`. The system meson (a different version)
+SHALL NOT be used for any such target, because it cannot load the pickle
+frida-meson wrote (`ModuleNotFoundError: mesonbuild.options` / "generated with
+an old version of meson"). The `build` target (`ninja -C build`) is exempt: it
+runs the generated `build.ninja` and does not load the pickle. In particular,
+`make test` SHALL run `$(PYTHON_FOR_MESON) $(FRIDA_MESON) test -C $(BUILD_DIR)`
+rather than bare `meson test`.
+
+#### Scenario: make test loads the frida-meson build dir
+- **WHEN** `make test` runs after `make setup`
+- **THEN** it invokes frida's meson (the same `$(FRIDA_MESON)` that wrote
+  `coredata.dat`), loads the build dir without a pickle-version error, and
+  runs the host unit tests
+
+#### Scenario: make test no longer uses the system meson
+- **WHEN** the `test` recipe in `Makefile` is examined
+- **THEN** it is `$(PYTHON_FOR_MESON) $(FRIDA_MESON) test -C $(BUILD_DIR)`,
+  not a bare `meson test -C $(BUILD_DIR)`
+
+#### Scenario: build target is unaffected
+- **WHEN** `make build` runs
+- **THEN** it runs `ninja -C $(BUILD_DIR)` (no meson pickle load) and is
+  unchanged by this requirement
 

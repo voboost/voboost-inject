@@ -141,3 +141,61 @@ Context: the boot logic previously lived inside `Supervisor`, which depends on
 - **THEN** `BootState.boot_completed()` returns false without throwing or
   blocking, and re-polls on the next call (a negative result is not cached)
 
+### Requirement: Daemon initialises frida-core before constructing any frida object
+
+The daemon SHALL call `Frida.init ()` exactly once at process startup, before
+any frida object (`Frida.DeviceManager`, device, session) is constructed. This
+runs frida-core's `g_once`-guarded `gum_init ()` (which sets the page-size
+cache, initialises cloak's `GumMetalArray`s, and creates the dlmalloc mspaces)
+plus `_frida_init_asset_paths ()`, so the embedded local backend never reaches
+frida-gum or frida-core subsystems in a half-initialised state.
+
+#### Scenario: main() calls Frida.init () first
+- **WHEN** the daemon process starts
+- **THEN** `main ()` calls `Frida.init ()` after `Log.init ()` and before
+  constructing the `Daemon` / `Supervisor` / `FridaController`
+
+#### Scenario: No GLib-CRITICAL at startup on an emulator
+- **WHEN** the daemon starts on an Android emulator (`ro.kernel.qemu=1`)
+- **THEN** no `GLib-CRITICAL ... g_hash_table_insert_internal: assertion
+  'hash_table != NULL'` warning is emitted at startup (frida-core hash tables
+  are initialised before use)
+
+#### Scenario: Frida.init () is idempotent
+- **WHEN** `Frida.init ()` is called and frida-core later calls it again
+  internally
+- **THEN** the second call is a `g_once` no-op (no double-init, no leak)
+
+### Requirement: Emulator embedded-backend frida via page-size fix
+
+The frida-gum embedded local backend SHALL NOT abort the daemon on an Android
+emulator due to a zero-length `mmap`. `gum_query_page_size()` SHALL NEVER
+return 0: it lazily (re-)queries the backend and falls back to a 4 KiB page,
+so `(1 + n_pages) * page_size` and the `size==0` allocation guards can never
+collapse to a `mmap(NULL, 0)`. The patch SHALL be persisted via
+`subprojects/frida-gum.wrap` `diff_files` so clean clones apply it.
+
+The daemon SHALL NOT special-case emulators: the `is_emulator()` DEGRADED
+escape hatch is removed, so on an emulator the daemon opens the embedded
+frida-core local device exactly as on a real device. `DaemonState.DEGRADED`
+remains reachable only via verify_self failure, frida-open failure, and plan
+rejections. The `gum_query_page_size` fix is a no-op once the page-size cache
+is initialized, so it does not affect real devices or `frida-server`.
+
+#### Scenario: Emulator opens frida
+- **WHEN** the daemon starts on an Android emulator (`ro.kernel.qemu=1`)
+- **THEN** it opens the embedded frida-core local device without a
+  `gum_alloc_n_pages` abort and reaches READY with spawn-gating enabled (the
+  `page_size == 0` / uninitialised-heap abort is gone). Target agent delivery
+  on the emulator is a separate Linjector/BPF concern and is not asserted here.
+
+#### Scenario: Production device
+- **WHEN** the daemon starts on a production device (real hardware)
+- **THEN** frida opens normally and the `gum_query_page_size` fix is a no-op
+  (the page-size cache is already set), unchanged from before the fix
+
+#### Scenario: frida device cannot be opened
+- **WHEN** the embedded frida-core local device fails to open (on any host)
+- **THEN** the daemon transitions to DEGRADED and injects nothing (the
+  non-emulator DEGRADED path is unchanged)
+

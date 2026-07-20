@@ -14,10 +14,3 @@ SHALL never be attached (it is resumed immediately — see Spawn-gating).
 #### Scenario: Process receives an agent
 - **WHEN** a target process receives an agent
 - **THEN** the QuickJS runtime is loaded in that process and the agent runs on it
-
-## REMOVED Requirements
-
-### Requirement: Native agent receives config via data argument
-This scenario described the removed `native` agent path. Config is now delivered
-only via the js agent's `rpc.exports.init` (see "Opaque config delivery to
-agents").

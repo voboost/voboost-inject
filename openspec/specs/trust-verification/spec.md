@@ -1,9 +1,7 @@
 ## Purpose
 Specify the trust model: embedded public-key anchor, signed manifest verification, per-agent hash
 verification, and manifest as authoritative source of agent metadata.
-
 ## Requirements
-
 ### Requirement: Embedded public-key trust anchor
 The daemon SHALL use a public key compiled into the binary as its only trust anchor.
 It SHALL NOT read a trust anchor (`key.pub` or equivalent) from disk.
@@ -38,10 +36,12 @@ recorded in the verified manifest. An agent whose bytes do not match SHALL NOT b
 - **THEN** the daemon refuses to inject it and reports the failure in status
 
 ### Requirement: Manifest is the source of target process
-The daemon SHALL take each agent's target `process` exclusively from the verified manifest,
-never from the app-written injection plan.
+The daemon SHALL take each agent's target `process` exclusively from the
+verified manifest, never from the app-written injection plan. (The `kind`
+field is removed: every agent is JavaScript.)
 
 #### Scenario: Plan attempts to override target
 - **WHEN** the injection plan references an agent
 - **THEN** the daemon resolves that agent's target process from the manifest
   and ignores any such field in the plan
+

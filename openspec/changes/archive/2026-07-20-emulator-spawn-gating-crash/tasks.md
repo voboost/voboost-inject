@@ -20,6 +20,6 @@
 
 ## 3. Validate
 
-- [ ] 3.1 `npx @fission-ai/openspec validate emulator-spawn-gating-crash
+- [x] 3.1 `npx @fission-ai/openspec validate emulator-spawn-gating-crash
       --strict` passes
-- [ ] 3.2 `make build` passes (no code change expected)
+- [x] 3.2 `make build` passes (no code change expected)

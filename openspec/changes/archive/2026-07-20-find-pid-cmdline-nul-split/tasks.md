@@ -14,6 +14,6 @@
 ## 3. Validate
 
 - [x] 3.1 `make build`, `make test`, `make lint` pass (host)
-- [ ] 3.2 `make build-android` passes
-- [ ] 3.3 Emulator: daemon does not crash on find_pid /proc fallback;
+- [x] 3.2 `make build-android` passes
+- [x] 3.3 Emulator: daemon does not crash on find_pid /proc fallback;
       `attach-launcher` resolves pid and injects (`state: active`)

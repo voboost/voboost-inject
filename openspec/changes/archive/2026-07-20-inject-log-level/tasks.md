@@ -22,8 +22,8 @@
 
 ## 3. Validate
 
-- [ ] 3.1 `npx @fission-ai/openspec validate inject-log-level --strict` passes
-- [ ] 3.2 `make build`, `make test`, `make lint` pass (host)
-- [ ] 3.3 `make build-android` passes
-- [ ] 3.4 Emulator: `inject.json` with `"log_level":"debug"` emits `[#]`
+- [x] 3.1 `npx @fission-ai/openspec validate inject-log-level --strict` passes
+- [x] 3.2 `make build`, `make test`, `make lint` pass (host)
+- [x] 3.3 `make build-android` passes
+- [x] 3.4 Emulator: `inject.json` with `"log_level":"debug"` emits `[#]`
       `find_pid` lines; `"info"` (or absent) emits none
