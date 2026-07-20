@@ -212,42 +212,39 @@ sign:
 	openssl pkeyutl -sign -inkey "$(KEY)" -rawin -in "$(FILE)" -out "$(FILE).sig"
 	@echo "Signed $(FILE) -> $(FILE).sig"
 
-.PHONY: inject-apk
+.PHONY: sign-elf
 
-# Build the daemon inject APK (ota-core-selfupdate contract). Packages the
-# stripped daemon binary + the signed per-agent manifest into a ZIP named
-# voboost-inject.apk with the fixed asset entries the daemon's ZIP reader
-# expects: assets/manifest.json, assets/manifest.sig, assets/voboost-inject
-# (design D1/D5). The daemon re-verifies the embedded manifest against
-# EMBEDDED_PUBKEY at apply time; the APK's own Android signature is NOT
-# verified by the daemon (D1).
+# Build the signed inject payload: a single ELF file carrying an appended
+# ed25519 signature in trailing bytes (VOBSIG1 magic + LE uint64 SIG_OFFSET
+# + 64-byte raw ed25519 sig over the ELF). The kernel loads the ELF by its
+# header and ignores the trailing 80 bytes at exec; the daemon's self-update
+# reads the trailing block and re-verifies the signature against
+# EMBEDDED_PUBKEY. One file, no ZIP wrapper, no embedded manifest.
 #
 # Inputs (passed by the caller, typically release.yml):
-#   BINARY=<path to the stripped daemon ELF>      (required)
-#   MANIFEST=<path to the daemon manifest.json>   (required)
-#   MANIFEST_SIG=<path to manifest.json.sig>      (required)
-#   OUT=<output apk path>                        (default: build/voboost-inject.apk)
+#   BINARY=<path to the stripped daemon ELF>   (required)
+#   KEY=<path to the ed25519 private key PEM>   (required)
+#   OUT=<output path>                           (default: build/voboost-inject)
 #
-# Python zipfile is stdlib and produces a well-formed ZIP the daemon's minimal
-# reader can parse (mirrors test/fixtures/gen-fixtures.sh). Entries are stored
-# uncompressed (method 0) so the reader's stored path is exercised; the daemon
-# also supports deflated entries (method 8) via its streaming inflater.
-inject-apk:
-	@test -n "$(BINARY)"       || { echo "inject-apk: BINARY=<daemon-elf> required"          >&2; exit 2; }
-	@test -n "$(MANIFEST)"     || { echo "inject-apk: MANIFEST=<manifest.json> required"     >&2; exit 2; }
-	@test -n "$(MANIFEST_SIG)" || { echo "inject-apk: MANIFEST_SIG=<manifest.json.sig> required" >&2; exit 2; }
-	@test -f "$(BINARY)"       || { echo "inject-apk: BINARY $(BINARY) not found"             >&2; exit 2; }
-	@test -f "$(MANIFEST)"     || { echo "inject-apk: MANIFEST $(MANIFEST) not found"         >&2; exit 2; }
-	@test -f "$(MANIFEST_SIG)" || { echo "inject-apk: MANIFEST_SIG $(MANIFEST_SIG) not found" >&2; exit 2; }
-	@out="$(OUT)"; [ -n "$$out" ] || out=build/voboost-inject.apk; \
+# Signing goes through a temp file (not an openssl stdin pipe): the pipe mixes
+# an error trail into the 64-byte signature. Mirrors test/fixtures/gen-fixtures.sh.
+sign-elf:
+	@test -n "$(BINARY)" || { echo "sign-elf: BINARY=<daemon-elf> required" >&2; exit 2; }
+	@test -n "$(KEY)"     || { echo "sign-elf: KEY=<private.pem> required" >&2; exit 2; }
+	@test -f "$(BINARY)"  || { echo "sign-elf: BINARY $(BINARY) not found" >&2; exit 2; }
+	@test -f "$(KEY)"     || { echo "sign-elf: KEY $(KEY) not found" >&2; exit 2; }
+	@out="$(OUT)"; [ -n "$$out" ] || out=build/voboost-inject; \
 	mkdir -p "$$(dirname "$$out")"; \
-	python3 -c 'import sys, zipfile; out,binary,manifest,sig=sys.argv[1:5]; \
-z=zipfile.ZipFile(out,"w",zipfile.ZIP_STORED); \
-z.write(manifest,"assets/manifest.json"); \
-z.write(sig,"assets/manifest.sig"); \
-z.write(binary,"assets/voboost-inject"); z.close(); \
-print("Wrote "+out)' "$$out" "$(BINARY)" "$(MANIFEST)" "$(MANIFEST_SIG)"
-	@echo "Inject APK built"
+	sigfile=$$(mktemp); \
+	openssl pkeyutl -sign -inkey "$(KEY)" -rawin -in "$(BINARY)" -out "$$sigfile"; \
+	python3 -c 'import sys, struct; out,binary,sig=sys.argv[1],sys.argv[2],sys.argv[3]; \
+elf=open(binary,"rb").read(); s=open(sig,"rb").read(); \
+assert len(s)==64, "ed25519 sig is %d bytes, want 64" % len(s); \
+trailing=b"VOBSIG1\\0" + struct.pack("<Q", len(elf)) + s; \
+open(out,"wb").write(elf); open(out,"ab").write(trailing); \
+print("Wrote "+out)' "$$out" "$(BINARY)" "$$sigfile"; \
+	rm -f "$$sigfile"
+	@echo "Signed inject payload built"
 
 verify-sig:
 	@test -n "$(KEY)"  || { echo "verify-sig: KEY=<public.pem> required" >&2; exit 2; }
