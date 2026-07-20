@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Inject update plane (on-device, no car reboot)
+### Requirement: Core update plane (on-device, no car reboot)
 The `voboost-inject` binary (the `inject` channel) SHALL be updatable
 on-device without a car reboot: the app downloads the binary and stages it;
 the daemon verifies it against the daemon-re-verified release manifest,

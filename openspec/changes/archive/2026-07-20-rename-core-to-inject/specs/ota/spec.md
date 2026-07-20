@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Two APKs, app-owned OTA client, daemon-owned inject self-update
+### Requirement: Two APKs, app-owned OTA client, daemon-owned core self-update
 Voboost SHALL ship as two APKs: `voboost` (the app, release-manifest channel
 `app`) and `voboost-inject` (the root daemon, channel `inject`). The voboost
 app SHALL own the OTA client: fetch a signed release manifest, compare
@@ -23,7 +23,7 @@ restarts the new binary.
 - **THEN** the daemon (not the app) re-verifies the staged APK, self-replaces
   the running binary, and exits so init restarts the new binary
 
-### Requirement: Consume the voboost-inject-update-ready marker before the apply
+### Requirement: Consume the core-update-ready marker before the apply
 The daemon SHALL treat the `voboost-inject-update-ready` marker as a
 single-use signal: it SHALL consume (remove) it BEFORE applying the staged
 APK, so a successful self-replace + self-shutdown + init-restart does not
@@ -77,7 +77,7 @@ it into memory (a DoS guard against an oversized staged payload).
 - **THEN** the next start launches the new binary with the marker present; a
   READY restart confirms (clears the marker, removes `.prev`)
 
-### Requirement: Inject rollback on a degraded restart
+### Requirement: Core rollback on a degraded restart
 The daemon SHALL roll back a pending inject switch on a (re)start that would
 enter DEGRADED: it `rename(2)`s `voboost-inject.prev` back to
 `voboost-inject` (overwriting the bad new binary), clears the
@@ -105,7 +105,7 @@ rather than exec a known-bad binary with no rollback target.
 - **THEN** the daemon stays DEGRADED (observe-only, injects nothing) rather
   than exec a known-bad binary with no rollback target
 
-### Requirement: Apply a staged inject APK update before the first injection
+### Requirement: Apply a staged core APK update before the first injection
 On boot the daemon SHALL apply a complete, verified staged inject APK update
 (one whose `voboost-inject-update-ready` marker is present and whose embedded
 manifest re-verifies with the embedded key) right after VERIFY_SELF and BEFORE

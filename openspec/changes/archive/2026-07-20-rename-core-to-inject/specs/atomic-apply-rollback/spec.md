@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Consume the voboost-inject-update-ready marker after apply
+### Requirement: Consume the update-ready marker after apply
 The daemon SHALL treat the `voboost-inject-update-ready` marker as a
 single-use signal: it SHALL remove it after any apply attempt on a staged set
 (agent or inject, whether the apply succeeded or the set failed
@@ -21,7 +21,7 @@ set every boot (which for the inject plane would crash-loop via self-shutdown
 - **THEN** the `voboost-inject-update-ready` marker is removed (the bad set is
   dropped, not retried), and the current set remains active
 
-### Requirement: Inject update via content-addressed install and init restart
+### Requirement: Core update via content-addressed install and init restart
 An inject update SHALL verify the staged binary's sha256 against the
 daemon-re-verified release manifest, install it as `voboost-inject-<sha>` in
 the root zone, write a `voboost-inject-switch-pending` marker naming the
@@ -51,7 +51,7 @@ memory (a DoS guard against an oversized staged payload).
 - **THEN** the next start launches the current (unchanged) binary; the
   orphaned `voboost-inject-<sha>` is ignored and may be garbage-collected
 
-### Requirement: Inject rollback on a degraded restart
+### Requirement: Core rollback on a degraded restart
 The daemon SHALL roll back a pending inject switch on a (re)start that would
 enter DEGRADED: it repoints the launch path back to the previous file named
 in the `voboost-inject-switch-pending` marker, clears the marker, and
