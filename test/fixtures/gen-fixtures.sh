@@ -1,15 +1,20 @@
 #!/bin/sh
 # Deterministically generate test fixtures from the committed dev keypair:
 # - a signed daemon manifest (manifest.json + manifest.sig) + a corrupt sig,
-#   used by the boot-recovery tests and as the APK's embedded manifest;
-# - a matching agent payload (agents/wm-viewport.js);
-# - a signed release manifest (release-manifest.json + .sig) listing the daemon
-#   APK as a single inject entry, plus negative fixtures (bad-entry, bad-channel,
-#   bad-sig, oversize);
-# - a daemon APK (voboost-inject.apk): a ZIP with assets/manifest.json,
-#   assets/manifest.sig, assets/voboost-inject (the daemon ELF binary), built
-#   via Python's zipfile (stdlib), plus a bad-embedded-sig APK and a
-#   bad-binary APK for the negative tests.
+#   used by the boot-recovery tests (the per-agent manifest; it no longer
+#   rides in the inject payload, but the daemon still loads/verifies it from
+#   the root zone at VERIFY_SELF);
+# - a matching agent payload (agents/wm-viewport.js, agents/launcher-echo.js);
+# - a signed inject payload (voboost-inject): a single file = the daemon ELF
+#   bytes (a stub "fake-inject-binary-v1\n") followed by an 80-byte trailing
+#   signature block (8 bytes magic "VOBSIG1\0", 8 bytes LE uint64 SIG_OFFSET,
+#   64 bytes raw ed25519 signature over the ELF bytes), plus negative
+#   fixtures: voboost-inject-bad-sig (valid magic/offset, flipped signature
+#   byte), voboost-inject-no-magic (trailing bytes without VOBSIG1),
+#   voboost-inject-truncated (shorter than the 80-byte trailing block);
+# - a signed release manifest (release-manifest.json + .sig) listing the
+#   inject file as a single inject-channel entry, plus negative fixtures
+#   (bad-entry, bad-channel, bad-sig).
 #
 # Run from the repo root by meson at configure time (or manually). Idempotent.
 set -eu
@@ -75,63 +80,88 @@ flipped=$(( first ^ 0xFF ))
 printf "\\$(printf '%03o' "$flipped")" \
   | dd of="$here/manifest-bad.sig" bs=1 count=1 conv=notrunc status=none
 
-# --- daemon binary (the ELF the APK embeds at assets/voboost-inject) ------
-# A dummy binary; the daemon's ZIP reader extracts it verbatim (stored) or
-# inflated (deflate). Two variants: a "good" one and a "bad" one (different
-# content, for the bad-binary negative test).
-printf 'fake-inject-binary-v1\n' > "$here/voboost-inject"
-printf 'fake-inject-binary-BAD\n' > "$here/voboost-inject-bad"
+# --- inject payload (single appended-sig ELF) ---------------------------
+# A stub daemon ELF (the real one is built by `make build-android`; the test
+# only exercises the trailing-block parser + signature verify, which do not
+# care about ELF structure — the kernel never execs this stub).
+printf 'fake-inject-binary-v1\n' > "$here/voboost-inject-elf"
 
-# --- release manifest (lists the daemon APK as the inject entry) ---------
-# The release manifest is the OTA client's trust source for the APK size+sha256
-# before staging. It lists the APK (voboost-inject.apk), not the raw binary.
-apk="$here/voboost-inject.apk"
-
-# Build the daemon APK first (so its sha/size can go in the release manifest).
-# Python zipfile is stdlib and produces a well-formed ZIP the daemon's minimal
-# reader can parse. Entries are stored uncompressed (method 0) so the reader's
-# stored path is exercised; a deflated variant is also built to exercise the
-# inflate path.
+# Build the signed inject payload by appending the VOBSIG1 trailing block to
+# the stub ELF: 8 bytes magic, 8 bytes LE uint64 SIG_OFFSET (= ELF byte size),
+# 64 bytes raw ed25519 signature over the ELF bytes (signed with the dev
+# keypair). Sign via a file (the rest of this script uses `openssl pkeyutl
+# -sign -rawin -in <file>`, which is the only form that produces a clean 64-byte
+# ed25519 signature on this openssl build — piping into -rawin mixes an error
+# trail into the output). Python stdlib only for the trailing-block append
+# (struct for the LE uint64).
+openssl pkeyutl -sign -inkey "$priv" -rawin \
+  -in "$here/voboost-inject-elf" -out "$here/voboost-inject-elf.sig"
 python3 - "$here" <<'PY'
-import os, sys, zipfile
+import os, struct, sys
 here = sys.argv[1]
-def build(apk_path, bin_path, manifest, sig):
-    with zipfile.ZipFile(apk_path, 'w', zipfile.ZIP_STORED) as z:
-        z.write(manifest, 'assets/manifest.json')
-        z.write(sig, 'assets/manifest.sig')
-        z.write(bin_path, 'assets/voboost-inject')
-build(os.path.join(here, 'voboost-inject.apk'),
-      os.path.join(here, 'voboost-inject'),
-      os.path.join(here, 'manifest.json'),
-      os.path.join(here, 'manifest.sig'))
-# A deflated APK (method 8) to exercise the inflate path.
-build(os.path.join(here, 'voboost-inject-deflated.apk'),
-      os.path.join(here, 'voboost-inject'),
-      os.path.join(here, 'manifest.json'),
-      os.path.join(here, 'manifest.sig'))
-# A bad-embedded-sig APK: valid manifest, corrupt sig.
-build(os.path.join(here, 'voboost-inject-bad-sig.apk'),
-      os.path.join(here, 'voboost-inject'),
-      os.path.join(here, 'manifest.json'),
-      os.path.join(here, 'manifest-bad.sig'))
-# A bad-binary APK: valid manifest+sig, but a different daemon binary (the
-# self-replace still proceeds — the binary is not hash-checked against the
-# release manifest by the daemon; this fixture is for the extract path).
-build(os.path.join(here, 'voboost-inject-bad-binary.apk'),
-      os.path.join(here, 'voboost-inject-bad'),
-      os.path.join(here, 'manifest.json'),
-      os.path.join(here, 'manifest.sig'))
+elf_path = os.path.join(here, "voboost-inject-elf")
+sig_path = os.path.join(here, "voboost-inject-elf.sig")
+with open(elf_path, "rb") as f:
+    elf_bytes = f.read()
+with open(sig_path, "rb") as f:
+    sig = f.read()
+assert len(sig) == 64, f"ed25519 sig is {len(sig)} bytes, want 64"
+trailing = b"VOBSIG1\0" + struct.pack("<Q", len(elf_bytes)) + sig
+assert len(trailing) == 80, f"trailing block is {len(trailing)} bytes, want 80"
+
+def write_payload(out_path, elf, trail):
+    with open(out_path, "wb") as f:
+        f.write(elf)
+        f.write(trail)
+
+# Good payload: ELF + valid trailing block.
+write_payload(os.path.join(here, "voboost-inject"), elf_bytes, trailing)
+
+# Bad-sig payload: valid magic/offset, signature with the first byte flipped.
+bad_sig = bytes([sig[0] ^ 0xFF]) + sig[1:]
+write_payload(
+    os.path.join(here, "voboost-inject-bad-sig"),
+    elf_bytes,
+    b"VOBSIG1\0" + struct.pack("<Q", len(elf_bytes)) + bad_sig,
+)
+
+# No-magic payload: trailing bytes without the VOBSIG1 magic (so the parser
+# rejects at the magic check before touching the signature).
+write_payload(
+    os.path.join(here, "voboost-inject-no-magic"),
+    elf_bytes,
+    b"XXXXXXXX" + struct.pack("<Q", len(elf_bytes)) + sig,
+)
+
+# Truncated payload: shorter than the 80-byte trailing block (rejected by the
+# minimum-size check before any parsing).
+with open(os.path.join(here, "voboost-inject-truncated"), "wb") as f:
+    f.write(elf_bytes)
+    f.write(b"VOBS")  # only 4 trailing bytes (< 80)
+
+# Lying-offset payload: valid magic and signature, but SIG_OFFSET points past
+# the file (out of bounds) so the bounds check rejects it.
+write_payload(
+    os.path.join(here, "voboost-inject-bad-offset"),
+    elf_bytes,
+    b"VOBSIG1\0" + struct.pack("<Q", len(elf_bytes) + 4096) + sig,
+)
 PY
+rm -f "$here/voboost-inject-elf.sig"
 
-apk_sha=$(openssl dgst -sha256 -hex "$apk" | awk '{ print $NF }')
-apk_size=$(stat -f%z "$apk" 2>/dev/null || stat -c%s "$apk" 2>/dev/null)
+inject_sha=$(openssl dgst -sha256 -hex "$here/voboost-inject" | awk '{ print $NF }')
+inject_size=$(stat -f%z "$here/voboost-inject" 2>/dev/null || stat -c%s "$here/voboost-inject" 2>/dev/null)
 
+# --- release manifest (lists the inject file as the inject entry) --------
+# The release manifest is the OTA client's trust source for the inject file
+# size+sha256 before staging. It lists the inject file (voboost-inject, a
+# single appended-sig ELF), not the old APK wrapper.
 cat > "$here/release-manifest.json" <<JSON
 {
   "version": "1.0.0-beta1",
   "channel": "inject",
   "files": [
-    {"path":"voboost-inject.apk","channel":"inject","sha256":"$apk_sha","size":$apk_size,"version":"1.0.0-beta1"}
+    {"path":"voboost-inject","channel":"inject","sha256":"$inject_sha","size":$inject_size,"version":"1.0.0-beta1"}
   ]
 }
 JSON
@@ -151,7 +181,7 @@ printf "\\$(printf '%03o' "$flipped")" \
 # (release-manifest spec).
 cat > "$here/release-manifest-bad-entry.json" <<JSON
 {"version":"1.0.0-beta1","channel":"inject","files":[
-  {"path":"voboost-inject.apk","channel":"inject","sha256":"$apk_sha","version":"1.0.0-beta1"}
+  {"path":"voboost-inject","channel":"inject","sha256":"$inject_sha","version":"1.0.0-beta1"}
 ]}
 JSON
 openssl pkeyutl -sign -inkey "$priv" -rawin \
@@ -160,7 +190,7 @@ openssl pkeyutl -sign -inkey "$priv" -rawin \
 
 cat > "$here/release-manifest-bad-channel.json" <<JSON
 {"version":"1.0.0-beta1","channel":"inject","files":[
-  {"path":"voboost-inject.apk","channel":"widgets","sha256":"$apk_sha","size":$apk_size,"version":"1.0.0-beta1"}
+  {"path":"voboost-inject","channel":"widgets","sha256":"$inject_sha","size":$inject_size,"version":"1.0.0-beta1"}
 ]}
 JSON
 openssl pkeyutl -sign -inkey "$priv" -rawin \

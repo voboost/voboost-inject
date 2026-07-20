@@ -80,10 +80,11 @@ ReleaseManifest load_release_manifest(Ota ota) {
     return rm;
 }
 
-// Stage a daemon APK + the voboost-inject-update-ready marker into staging/.
-void stage_inject_apk(string staging, string apk_name) {
-    copy_file(FIX + "/" + apk_name,
-              Path.build_filename(staging, "voboost-inject.apk"));
+// Stage an inject payload (single appended-sig ELF) + the
+// voboost-inject-update-ready marker into staging/.
+void stage_inject(string staging, string inject_name) {
+    copy_file(FIX + "/" + inject_name,
+              Path.build_filename(staging, "voboost-inject"));
     try {
         FileUtils.set_contents(
             Path.build_filename(staging, "voboost-inject-update-ready"), "ready");
@@ -115,7 +116,7 @@ void test_release_manifest_verify() {
     assert(rm.version == "1.0.0-beta1");
     assert(rm.channel == "inject");
     assert(rm.files.length == 1);
-    assert(rm.files[0].path == "voboost-inject.apk");
+    assert(rm.files[0].path == "voboost-inject");
     assert(rm.files[0].channel == "inject");
     assert(rm.files[0].size > 0);
 }
@@ -158,187 +159,69 @@ void test_release_manifest_bad_channel_rejected() {
     assert(ota.verify_release_manifest(rm, sig) == null);
 }
 
-// --- APK embedded-manifest re-verify + extract ----------------------------
+// --- appended-sig verify --------------------------------------------------
 
-// The ZIP reader extracts the named entry from the APK.
-void test_apk_extract_manifest() {
-    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject.apk");
-    uint8[] m;
-    assert(Ota.extract_apk_entry(apk, "assets/manifest.json", out m));
-    assert(m.length > 0);
-    uint8[] s;
-    assert(Ota.extract_apk_entry(apk, "assets/manifest.sig", out s));
-    assert(s.length == 64);
+// verify_appended_sig accepts a good payload and returns the ELF bytes.
+void test_appended_sig_verify_good() {
+    uint8[] payload = read_bytes_or_fail(FIX + "/voboost-inject");
+    uint8[] elf;
+    assert(Ota.verify_appended_sig(payload, new TrustStore(), out elf));
+    // The returned ELF bytes match the fixture ELF byte-for-byte.
+    uint8[] expected = read_bytes_or_fail(FIX + "/voboost-inject-elf");
+    assert(elf.length == expected.length);
+    assert(Posix.memcmp(elf, expected, elf.length) == 0);
 }
 
-void test_apk_extract_binary() {
-    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject.apk");
-    uint8[] bin;
-    assert(Ota.extract_apk_entry(apk, "assets/voboost-inject", out bin));
-    assert(bin.length > 0);
-    // The extracted binary matches the fixture binary byte-for-byte.
-    uint8[] expected = read_bytes_or_fail(FIX + "/voboost-inject");
-    assert(bin.length == expected.length);
-    assert(Posix.memcmp(bin, expected, bin.length) == 0);
+// A flipped signature byte fails verification (the magic and SIG_OFFSET are
+// fine; the ed25519 check rejects).
+void test_appended_sig_bad_sig_rejected() {
+    uint8[] payload = read_bytes_or_fail(FIX + "/voboost-inject-bad-sig");
+    uint8[] elf;
+    assert(!Ota.verify_appended_sig(payload, new TrustStore(), out elf));
 }
 
-// A deflated APK (method 8) is inflated correctly.
-void test_apk_extract_binary_deflated() {
-    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject-deflated.apk");
-    uint8[] bin;
-    assert(Ota.extract_apk_entry(apk, "assets/voboost-inject", out bin));
-    uint8[] expected = read_bytes_or_fail(FIX + "/voboost-inject");
-    assert(bin.length == expected.length);
-    assert(Posix.memcmp(bin, expected, bin.length) == 0);
+// Trailing bytes without the VOBSIG1 magic are rejected at the magic check.
+void test_appended_sig_no_magic_rejected() {
+    uint8[] payload = read_bytes_or_fail(FIX + "/voboost-inject-no-magic");
+    uint8[] elf;
+    assert(!Ota.verify_appended_sig(payload, new TrustStore(), out elf));
 }
 
-void test_apk_extract_missing_entry() {
-    uint8[] apk = read_bytes_or_fail(FIX + "/voboost-inject.apk");
-    uint8[] bin;
-    assert(!Ota.extract_apk_entry(apk, "assets/no-such-entry", out bin));
+// A file shorter than the 80-byte trailing block is rejected by the minimum
+// size check before any parsing.
+void test_appended_sig_truncated_rejected() {
+    uint8[] payload = read_bytes_or_fail(FIX + "/voboost-inject-truncated");
+    uint8[] elf;
+    assert(!Ota.verify_appended_sig(payload, new TrustStore(), out elf));
 }
 
-// Build a minimal in-memory ZIP with one deflated entry whose central-
-// directory uncomp_size is understated (set to 1), so the inflate growth
-// path fires: the initial out_cap is too small and the buffer must grow to
-// hold the real inflated bytes. This validates the F1 fix (the growth cap
-// must not falsely reject a stream whose true size is between half-cap and
-// full-cap; here the true size is small and the hint is lying).
-//
-// The raw deflate stream is produced by ZlibCompressor (RAW format) so it
-// matches what inflate_raw expects. The ZIP is assembled by hand: one
-// central-directory entry + one local file header + the deflated data +
-// the EOCD record.
-uint8[] build_lying_deflate_zip(string entry_name, string payload) {
-    // Compress the payload with raw deflate.
-    var comp = new ZlibCompressor(ZlibCompressorFormat.RAW);
-    var min = new MemoryInputStream.from_data(payload.data);
-    var cin = new ConverterInputStream(min, comp);
-    var out_buf = new uint8[4096];
-    size_t total = 0;
-    var tmp = new uint8[4096];
-    while (true) {
-        ssize_t n = cin.read(tmp);
-        if (n == 0) {
-            break;
-        }
-        if (total + n > out_buf.length) {
-            var grown = new uint8[out_buf.length * 2];
-            Posix.memcpy(grown, out_buf, total);
-            out_buf = grown;
-        }
-        Posix.memcpy(&out_buf[total], tmp, (size_t) n);
-        total += (size_t) n;
-    }
-    uint8[] comp_data = out_buf[0 : total];
-    int comp_size = (int) comp_data.length;
-    int real_uncomp = payload.data.length;
-
-    // Local file header (30 bytes) + name + deflated data.
-    uint8[] name = entry_name.data;
-    int name_len = name.length;
-    int local_size = 30 + name_len + comp_size;
-    var local = new uint8[local_size];
-    // Signature 0x04034b50.
-    local[0] = 0x50; local[1] = 0x4b; local[2] = 0x03; local[3] = 0x04;
-    write_le16(local, 4, 20);  // version needed
-    write_le16(local, 6, 0);   // flags
-    write_le16(local, 8, 8);   // method = deflate
-    write_le16(local, 10, 0);  // mod time
-    write_le16(local, 12, 0);  // mod date
-    write_le32(local, 14, 0);  // crc32 (not checked by the reader)
-    write_le32(local, 18, comp_size);
-    write_le32(local, 22, real_uncomp);  // local uncomp_size (honest)
-    write_le16(local, 26, name_len);
-    write_le16(local, 28, 0);  // extra len
-    Posix.memcpy(&local[30], name, name_len);
-    Posix.memcpy(&local[30 + name_len], comp_data, comp_size);
-
-    // Central directory entry (46 bytes) + name.
-    int cd_size = 46 + name_len;
-    var cd = new uint8[cd_size];
-    cd[0] = 0x50; cd[1] = 0x4b; cd[2] = 0x01; cd[3] = 0x02;
-    write_le16(cd, 4, 20);   // version made by
-    write_le16(cd, 6, 20);   // version needed
-    write_le16(cd, 8, 0);    // flags
-    write_le16(cd, 10, 8);   // method = deflate
-    write_le16(cd, 12, 0);   // mod time
-    write_le16(cd, 14, 0);   // mod date
-    write_le32(cd, 16, 0);   // crc32
-    write_le32(cd, 20, comp_size);
-    // LYING uncomp_size: 1 (forces the growth path).
-    write_le32(cd, 24, 1);
-    write_le16(cd, 28, name_len);
-    write_le16(cd, 30, 0);  // extra len
-    write_le16(cd, 32, 0);  // comment len
-    write_le16(cd, 34, 0);  // disk number start
-    write_le16(cd, 36, 0);  // internal attrs
-    write_le32(cd, 38, 0);  // external attrs
-    write_le32(cd, 42, 0);  // local header offset
-    Posix.memcpy(&cd[46], name, name_len);
-
-    // EOCD (22 bytes).
-    var eocd = new uint8[22];
-    eocd[0] = 0x50; eocd[1] = 0x4b; eocd[2] = 0x05; eocd[3] = 0x06;
-    write_le16(eocd, 4, 0);   // disk number
-    write_le16(eocd, 6, 0);   // disk with cd
-    write_le16(eocd, 8, 1);   // entries on this disk
-    write_le16(eocd, 10, 1);  // total entries
-    write_le32(eocd, 12, cd_size);
-    write_le32(eocd, 16, local_size);  // cd offset
-    write_le16(eocd, 20, 0);  // comment len
-
-    // Concatenate: local + cd + eocd.
-    var apk = new uint8[local_size + cd_size + 22];
-    Posix.memcpy(apk, local, local_size);
-    Posix.memcpy(&apk[local_size], cd, cd_size);
-    Posix.memcpy(&apk[local_size + cd_size], eocd, 22);
-    return apk;
+// A SIG_OFFSET that points past the file is rejected by the bounds check.
+void test_appended_sig_bad_offset_rejected() {
+    uint8[] payload = read_bytes_or_fail(FIX + "/voboost-inject-bad-offset");
+    uint8[] elf;
+    assert(!Ota.verify_appended_sig(payload, new TrustStore(), out elf));
 }
 
-void write_le16(uint8[] b, int off, int v) {
-    b[off] = (uint8) (v & 0xff);
-    b[off + 1] = (uint8) ((v >> 8) & 0xff);
+// An exactly-empty payload (zero bytes) is rejected.
+void test_appended_sig_empty_rejected() {
+    var empty = new uint8[0];
+    uint8[] elf;
+    assert(!Ota.verify_appended_sig(empty, new TrustStore(), out elf));
 }
 
-void write_le32(uint8[] b, int off, int v) {
-    b[off] = (uint8) (v & 0xff);
-    b[off + 1] = (uint8) ((v >> 8) & 0xff);
-    b[off + 2] = (uint8) ((v >> 16) & 0xff);
-    b[off + 3] = (uint8) ((v >> 24) & 0xff);
-}
 
-// A deflated entry whose central-directory uncomp_size is understated (1)
-// must still inflate correctly via the growth path: the initial out_cap is
-// too small, the buffer grows, and the full payload is returned. This
-// validates the F1 fix (the growth cap must not falsely reject).
-void test_apk_extract_deflated_growth_path() {
-    // A payload large enough to force at least one growth step from out_cap=1.
-    var sb = new StringBuilder();
-    for (int i = 0; i < 2000; i++) {
-        sb.append_c('x');
-    }
-    string payload = sb.str;
-    uint8[] apk = build_lying_deflate_zip("entry.bin", payload);
-    uint8[] extracted;
-    assert(Ota.extract_apk_entry(apk, "entry.bin", out extracted));
-    // The inflated bytes must equal the original payload.
-    assert(extracted.length == payload.data.length);
-    assert(Posix.memcmp(extracted, payload.data, extracted.length) == 0);
-}
-
-// --- inject APK apply / rollback ------------------------------------------
+// --- inject apply / rollback ----------------------------------------------
 
 // A successful self-replace: the running binary is renamed to .prev, the new
 // binary takes the stable pathname, the marker is set, and the marker in
 // staging/ is consumed (single-use).
-void test_inject_apk_apply_success() {
+void test_inject_apply_success() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
     string oldsha = file_sha(Path.build_filename(root, "voboost-inject"));
-    stage_inject_apk(staging, "voboost-inject.apk");
+    stage_inject(staging, "voboost-inject");
     assert(ota.apply_inject_update(staging)
            == InjectApplyOutcome.APPLIED);
     // The marker is consumed (single-use).
@@ -359,30 +242,16 @@ void test_inject_apk_apply_success() {
     rm_rf(staging);
 }
 
-// A deflated APK applies the same as a stored one.
-void test_inject_apk_apply_deflated() {
+// A bad appended signature is rejected; the current binary stays active and
+// the marker is consumed (the bad payload is dropped).
+void test_inject_apply_bad_sig() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
-    stage_inject_apk(staging, "voboost-inject-deflated.apk");
+    stage_inject(staging, "voboost-inject-bad-sig");
     assert(ota.apply_inject_update(staging)
-           == InjectApplyOutcome.APPLIED);
-    assert(ota.inject_switch_pending());
-    rm_rf(root);
-    rm_rf(staging);
-}
-
-// A bad embedded manifest signature is rejected; the current binary stays
-// active and the marker is consumed (the bad APK is dropped).
-void test_inject_apk_apply_bad_embedded_sig() {
-    string root = fresh_root();
-    string staging = fresh_staging();
-    var ota = new Ota(root, new TrustStore());
-    write_old_binary(root);
-    stage_inject_apk(staging, "voboost-inject-bad-sig.apk");
-    assert(ota.apply_inject_update(staging)
-           == InjectApplyOutcome.REJECTED_BAD_MANIFEST);
+           == InjectApplyOutcome.REJECTED_BAD_BINARY);
     assert(!ota.inject_switch_pending());
     assert(!FileUtils.test(
                Path.build_filename(root, "voboost-inject.prev"),
@@ -395,8 +264,34 @@ void test_inject_apk_apply_bad_embedded_sig() {
     rm_rf(staging);
 }
 
-// No staged APK -> REJECTED_NO_APK, marker consumed.
-void test_inject_apk_apply_no_apk() {
+// A payload missing the VOBSIG1 magic is rejected at the magic check.
+void test_inject_apply_no_magic() {
+    string root = fresh_root();
+    string staging = fresh_staging();
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    stage_inject(staging, "voboost-inject-no-magic");
+    assert(ota.apply_inject_update(staging)
+           == InjectApplyOutcome.REJECTED_BAD_BINARY);
+    rm_rf(root);
+    rm_rf(staging);
+}
+
+// A truncated payload (shorter than the 80-byte trailing block) is rejected.
+void test_inject_apply_truncated() {
+    string root = fresh_root();
+    string staging = fresh_staging();
+    var ota = new Ota(root, new TrustStore());
+    write_old_binary(root);
+    stage_inject(staging, "voboost-inject-truncated");
+    assert(ota.apply_inject_update(staging)
+           == InjectApplyOutcome.REJECTED_BAD_BINARY);
+    rm_rf(root);
+    rm_rf(staging);
+}
+
+// No staged inject file -> REJECTED_NO_APK, marker consumed.
+void test_inject_apply_no_inject() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
@@ -417,13 +312,13 @@ void test_inject_apk_apply_no_apk() {
 
 // Rollback on a DEGRADED restart: .prev is restored over the bad new binary,
 // the marker is cleared.
-void test_inject_apk_rollback_restores_prev() {
+void test_inject_rollback_restores_prev() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
     string oldsha = file_sha(Path.build_filename(root, "voboost-inject"));
-    stage_inject_apk(staging, "voboost-inject.apk");
+    stage_inject(staging, "voboost-inject");
     ota.apply_inject_update(staging);
     assert(ota.inject_switch_pending());
     assert(ota.rollback_inject_switch());
@@ -439,12 +334,12 @@ void test_inject_apk_rollback_restores_prev() {
 }
 
 // Confirm on a READY restart: marker cleared, .prev removed.
-void test_inject_apk_confirm_clears_marker_and_removes_prev() {
+void test_inject_confirm_clears_marker_and_removes_prev() {
     string root = fresh_root();
     string staging = fresh_staging();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
-    stage_inject_apk(staging, "voboost-inject.apk");
+    stage_inject(staging, "voboost-inject");
     ota.apply_inject_update(staging);
     assert(ota.inject_switch_pending());
     ota.confirm_inject_switch();
@@ -457,7 +352,7 @@ void test_inject_apk_confirm_clears_marker_and_removes_prev() {
 }
 
 // No .prev rollback target: rollback returns false (stay DEGRADED).
-void test_inject_apk_rollback_no_prev_target() {
+void test_inject_rollback_no_prev_target() {
     string root = fresh_root();
     var ota = new Ota(root, new TrustStore());
     write_old_binary(root);
@@ -542,20 +437,21 @@ public static int main(string[] args) {
     Test.add_func("/ota/release-manifest/oversize", test_release_manifest_oversize_rejected);
     Test.add_func("/ota/release-manifest/bad-entry", test_release_manifest_bad_entry_rejected);
     Test.add_func("/ota/release-manifest/bad-channel", test_release_manifest_bad_channel_rejected);
-    Test.add_func("/ota/apk-extract/manifest", test_apk_extract_manifest);
-    Test.add_func("/ota/apk-extract/binary", test_apk_extract_binary);
-    Test.add_func("/ota/apk-extract/binary-deflated", test_apk_extract_binary_deflated);
-    Test.add_func("/ota/apk-extract/missing", test_apk_extract_missing_entry);
-    Test.add_func("/ota/apk-extract/deflated-growth-path",
-                  test_apk_extract_deflated_growth_path);
-    Test.add_func("/ota/inject-apk-apply/success", test_inject_apk_apply_success);
-    Test.add_func("/ota/inject-apk-apply/deflated", test_inject_apk_apply_deflated);
-    Test.add_func("/ota/inject-apk-apply/bad-embedded-sig", test_inject_apk_apply_bad_embedded_sig);
-    Test.add_func("/ota/inject-apk-apply/no-apk", test_inject_apk_apply_no_apk);
-    Test.add_func("/ota/inject-apk-apply/rollback", test_inject_apk_rollback_restores_prev);
-    Test.add_func("/ota/inject-apk-apply/confirm",
-                  test_inject_apk_confirm_clears_marker_and_removes_prev);
-    Test.add_func("/ota/inject-apk-apply/rollback-no-prev", test_inject_apk_rollback_no_prev_target);
+    Test.add_func("/ota/appended-sig/verify-good", test_appended_sig_verify_good);
+    Test.add_func("/ota/appended-sig/bad-sig", test_appended_sig_bad_sig_rejected);
+    Test.add_func("/ota/appended-sig/no-magic", test_appended_sig_no_magic_rejected);
+    Test.add_func("/ota/appended-sig/truncated", test_appended_sig_truncated_rejected);
+    Test.add_func("/ota/appended-sig/bad-offset", test_appended_sig_bad_offset_rejected);
+    Test.add_func("/ota/appended-sig/empty", test_appended_sig_empty_rejected);
+    Test.add_func("/ota/inject-apply/success", test_inject_apply_success);
+    Test.add_func("/ota/inject-apply/bad-sig", test_inject_apply_bad_sig);
+    Test.add_func("/ota/inject-apply/no-magic", test_inject_apply_no_magic);
+    Test.add_func("/ota/inject-apply/truncated", test_inject_apply_truncated);
+    Test.add_func("/ota/inject-apply/no-inject", test_inject_apply_no_inject);
+    Test.add_func("/ota/inject-apply/rollback", test_inject_rollback_restores_prev);
+    Test.add_func("/ota/inject-apply/confirm",
+                  test_inject_confirm_clears_marker_and_removes_prev);
+    Test.add_func("/ota/inject-apply/rollback-no-prev", test_inject_rollback_no_prev_target);
     Test.add_func("/ota/boot-recovery/restores-prev", test_boot_recovery_restores_prev);
     Test.add_func("/ota/boot-recovery/noop", test_boot_recovery_noop_when_active_ok);
     Test.add_func("/ota/boot-recovery/active-bad", test_boot_recovery_restores_when_active_bad);

@@ -51,7 +51,6 @@ public ReleaseFile? find_inject(string basename) {
 public enum InjectApplyOutcome {
     APPLIED,
     REJECTED_NO_APK,
-    REJECTED_BAD_MANIFEST,
     REJECTED_BAD_BINARY,
     // The previous binary could not be preserved for rollback (IO error during
     // the rename aside); the switch is aborted so a bad new binary is never
@@ -85,14 +84,13 @@ public TrustStore trust { get; construct; }
 // Bounds for the release-manifest parser (mirrors PlanReader.MAX_PLAN_BYTES).
 public const int MAX_RELEASE_MANIFEST_BYTES = 1048576;
 public const int MAX_RELEASE_ENTRIES = 4096;
-// Bounds for the APK ZIP reader (design D5): a pathologically large archive
-// must not exhaust memory. The daemon APK is tens of MB; 64 MB is a generous
-// upper bound that rejects anything unreasonable before parsing.
+// DoS bound for the staged inject payload (a single appended-sig ELF). The
+// daemon ELF is tens of MB; 64 MB is a generous upper bound that rejects
+// anything unreasonable before reading the file into memory.
 // INJ-04: was 256 MB, which allowed FileUtils.get_data to allocate up to
 // 256 MB before the post-read size check. 64 MB is still 4-8x a typical
-// daemon APK and bounds the peak memory of the ZIP reader.
-public const int64 MAX_APK_BYTES = 67108864;
-public const int MAX_APK_ENTRIES = 65536;
+// daemon ELF and bounds the peak memory of the apply path.
+public const int64 MAX_INJECT_BYTES = 67108864;
 
 // Fixed names. OTA applies are serialized on the daemon's single-threaded
 // GMainLoop, so no two applies race for the same temp.
@@ -103,16 +101,10 @@ private const string MANIFEST_SIG_PREV = "manifest.sig.prev";
 private const string INJECT_BINARY = "voboost-inject";
 private const string INJECT_PREV = "voboost-inject.prev";
 private const string INJECT_MARKER = "run/voboost-inject-switch-pending";
-// The producer's "a verified daemon APK is staged" marker, created last in
+// The producer's "a verified daemon ELF is staged" marker, created last in
 // the app-zone staging/ dir. Lives in the app zone but the daemon (root)
 // owns its lifecycle as the consumer. Single-use (design D4).
 private const string INJECT_UPDATE_READY = "voboost-inject-update-ready";
-// The fixed asset path of the daemon ELF inside the APK (design D5 open
-// question, pinned by the daemon APK build). The ZIP reader locates it by
-// this name; the build MUST place the raw ELF here.
-private const string APK_BINARY_ENTRY = "assets/voboost-inject";
-private const string APK_MANIFEST_ENTRY = "assets/manifest.json";
-private const string APK_MANIFEST_SIG_ENTRY = "assets/manifest.sig";
 
 public Ota(string root_zone, TrustStore trust) {
     Object(root_zone: root_zone, trust: trust);
@@ -246,70 +238,55 @@ public bool recover_manifest() {
     return true;
 }
 
-// Apply a staged inject APK update (ota-core-selfupdate). The marker is
-// consumed FIRST (single-use, design D4), then the staged APK is found, its
-// embedded manifest.json+.sig re-verified against EMBEDDED_PUBKEY (design
-// D1), the daemon ELF binary extracted from the APK (design D5), and the
-// running binary atomically self-replaced (rename aside to .prev, install
-// the new binary at the same pathname, design D2). The
+// Apply a staged inject update (ota-core-selfupdate). The marker is consumed
+// FIRST (single-use, design D4), then the staged inject file (a single ELF
+// with an appended ed25519 signature) is found, the appended signature is
+// re-verified against EMBEDDED_PUBKEY over the ELF bytes (design D1), and the
+// ELF portion is atomically self-replaced (rename aside to .prev, install the
+// new binary at the same pathname, design D2). The
 // voboost-inject-switch-pending marker is written and the caller self-shuts
 // down so init restarts the new binary. On any REJECTED_* the current binary
-// stays active (the marker is already consumed — the bad APK is dropped, not
-// retried every boot).
+// stays active (the marker is already consumed — the bad payload is dropped,
+// not retried every boot). The inject payload carries no embedded per-agent
+// manifest; the per-agent manifest rides in the app APK.
 public InjectApplyOutcome apply_inject_update(string staging_dir) {
     // Consume the marker BEFORE the apply (design D4): a successful
     // self-replace + self-shutdown + init-restart must not re-apply the same
-    // APK on every boot (crash-loop). The marker is the trigger, not part of
-    // the verified set, so consuming it first is safe.
+    // payload on every boot (crash-loop). The marker is the trigger, not part
+    // of the verified set, so consuming it first is safe.
     consume_inject_update_ready(staging_dir);
-    string apk = find_staged_inject(staging_dir);
-    if (apk == null) {
-        Log.err("ota", "no staged daemon APK in staging/");
+    string inject = find_staged_inject(staging_dir);
+    if (inject == null) {
+        Log.err("ota", "no staged inject file in staging/");
         return InjectApplyOutcome.REJECTED_NO_APK;
     }
-    // DoS guard: reject an oversized APK before reading it into memory.
+    // DoS guard: reject an oversized inject file before reading it.
     Posix.Stat st;
-    if (Posix.stat(apk, out st) != 0 || st.st_size > MAX_APK_BYTES) {
-        Log.err("ota", "staged APK oversize/absent");
+    if (Posix.stat(inject, out st) != 0 || st.st_size > MAX_INJECT_BYTES) {
+        Log.err("ota", "staged inject file oversize/absent");
         return InjectApplyOutcome.REJECTED_NO_APK;
     }
-    uint8[] apk_bytes;
+    uint8[] inject_bytes;
     try {
-        FileUtils.get_data(apk, out apk_bytes);
+        FileUtils.get_data(inject, out inject_bytes);
     } catch (Error e) {
-        Log.err("ota", "staged APK read: " + e.message);
+        Log.err("ota", "staged inject file read: " + e.message);
         return InjectApplyOutcome.REJECTED_NO_APK;
     }
-    if (apk_bytes.length > MAX_APK_BYTES) {
-        Log.err("ota", "staged APK grew past bound");
+    if (inject_bytes.length > MAX_INJECT_BYTES) {
+        Log.err("ota", "staged inject file grew past bound");
         return InjectApplyOutcome.REJECTED_NO_APK;
     }
-    // Re-verify the APK's embedded manifest against EMBEDDED_PUBKEY (design
-    // D1). The APK's own Android signature is NOT verified here.
-    uint8[] m_bytes = new uint8[0];
-    uint8[] s_bytes = new uint8[0];
-    if (!extract_apk_entry(apk_bytes, APK_MANIFEST_ENTRY, out m_bytes)) {
-        Log.err("ota", "staged APK missing embedded manifest entry");
-        return InjectApplyOutcome.REJECTED_BAD_MANIFEST;
-    }
-    if (!extract_apk_entry(
-            apk_bytes, APK_MANIFEST_SIG_ENTRY, out s_bytes)) {
-        Log.err("ota", "staged APK missing embedded manifest.sig entry");
-        return InjectApplyOutcome.REJECTED_BAD_MANIFEST;
-    }
-    var embedded = new Manifest();
-    if (!embedded.load_verified(m_bytes, s_bytes, this.trust)) {
-        Log.err("ota", "staged APK embedded manifest rejected");
-        return InjectApplyOutcome.REJECTED_BAD_MANIFEST;
-    }
-    // Extract the daemon ELF binary from the APK.
+    // Re-verify the appended ed25519 signature over the ELF bytes against
+    // EMBEDDED_PUBKEY (design D1). The trailing VOBSIG1 block names the ELF
+    // part by SIG_OFFSET; verify_appended_sig slices and verifies it.
     uint8[] bin_bytes;
-    if (!extract_apk_entry(apk_bytes, APK_BINARY_ENTRY, out bin_bytes)) {
-        Log.err("ota", "staged APK missing daemon binary entry");
+    if (!verify_appended_sig(inject_bytes, this.trust, out bin_bytes)) {
+        Log.err("ota", "staged inject signature rejected");
         return InjectApplyOutcome.REJECTED_BAD_BINARY;
     }
     if (bin_bytes.length == 0) {
-        Log.err("ota", "staged APK daemon binary is empty");
+        Log.err("ota", "staged inject ELF is empty");
         return InjectApplyOutcome.REJECTED_BAD_BINARY;
     }
     // Install the new binary as a root-zone temp, fsync, fchmod 0755.
@@ -410,13 +387,14 @@ private bool manifest_verifies(string path, string sig_path) {
     return this.trust.verify_signature(json_bytes, sig);
 }
 
-// Find the staged daemon APK in staging/. The producer stages it under a
+// Find the staged inject file in staging/. The producer stages it under a
 // fixed name; return its path or null. (The producer contract: exactly one
-// daemon APK named voboost-inject.apk in staging/.)
+// inject file named voboost-inject — a single appended-sig ELF, no extension
+// — in staging/.)
 private string? find_staged_inject(string staging_dir) {
-    string apk = Path.build_filename(staging_dir, "voboost-inject.apk");
-    if (FileUtils.test(apk, FileTest.EXISTS)) {
-        return apk;
+    string inject = Path.build_filename(staging_dir, "voboost-inject");
+    if (FileUtils.test(inject, FileTest.EXISTS)) {
+        return inject;
     }
     return null;
 }
@@ -486,205 +464,72 @@ private bool write_marker() {
     return FileUtils.rename(tmp, marker) == 0;
 }
 
-// --- minimal ZIP reader (design D5) ------------------------------------
-// Parses the ZIP central directory to locate a named entry, then reads its
-// local header for the data offset and compression method. Method 0 (stored)
-// returns the bytes verbatim; method 8 (deflate) inflates via
-// ZlibDecompressor (RAW format, no zlib header). Bounded by MAX_APK_BYTES /
-// MAX_APK_ENTRIES. Only the requested named entry is ever extracted.
+// --- appended-signature verify (design D1/D2) ---------------------------
+// The staged inject payload is a single file: the daemon ELF bytes followed
+// by an 80-byte trailing block (8 bytes magic "VOBSIG1\0", 8 bytes LE uint64
+// SIG_OFFSET naming the end of the ELF part, 64 bytes raw ed25519 signature
+// over the ELF bytes). The kernel loads the ELF by its header and ignores the
+// trailing bytes at exec; the daemon reads the trailing block here to
+// re-verify the signature before installing the ELF portion.
 
-// Extract a named entry from an in-memory APK (ZIP) archive into `out data`.
-// Returns false on any parse/decompress error or if the entry is absent.
-// Static: pure function of its inputs (no instance state), so tests can call
-// it directly without constructing an Ota.
-public static bool extract_apk_entry(uint8[] apk, string name,
-                                     out uint8[] data) {
-    data = new uint8[0];
-    // Locate the End-of-Central-Directory record (EOCD): a 22-byte record
-    // with signature 0x06054b50, possibly followed by a variable-length
-    // comment. Scan from the end of the archive backwards (bounded).
-    if (apk.length < 22) {
+// Verify the appended signature of a staged inject file. On success, slices
+// the ELF bytes [0..SIG_OFFSET) into `out elf_bytes` and returns true. On any
+// structural failure (file too short, missing VOBSIG1 magic, SIG_OFFSET out
+// of bounds) or signature failure, returns false and sets elf_bytes to empty.
+// Static + pure (no instance state); takes the TrustStore explicitly so tests
+// can call it directly without constructing an Ota.
+public static bool verify_appended_sig(
+        uint8[] bytes, TrustStore trust, out uint8[] elf_bytes) {
+    elf_bytes = new uint8[0];
+    // Trailing block = 8 magic + 8 offset + 64 signature = 80 bytes.
+    const int TRAILING = 80;
+    // Need at least 1 ELF byte + the trailing block.
+    if (bytes.length < TRAILING + 1) {
         return false;
     }
-    int eocd = -1;
-    int scan_from = apk.length - 22;
-    int scan_to = apk.length - 65557;  // max comment is 65535 bytes
-    if (scan_to < 0) {
-        scan_to = 0;
-    }
-    for (int i = scan_from; i >= scan_to; i--) {
-        if (apk[i] == 0x50 && apk[i + 1] == 0x4b
-            && apk[i + 2] == 0x05 && apk[i + 3] == 0x06) {
-            eocd = i;
-            break;
-        }
-    }
-    if (eocd < 0) {
+    int trailing_start = bytes.length - TRAILING;
+    // Magic: "VOBSIG1\0" (8 bytes ASCII, NUL-padded). Built byte-by-byte so
+    // the comparator gets a real pointer; a Vala inline-array declaration is
+    // not allowed here.
+    uint8[] magic = new uint8[] {
+        'V', 'O', 'B', 'S', 'I', 'G', '1', 0
+    };
+    if (Posix.memcmp(&bytes[trailing_start], &magic[0], 8) != 0) {
         return false;
     }
-    int cd_entries = (int) read_le16(apk, eocd + 10);
-    int cd_size = (int) read_le32(apk, eocd + 12);
-    int cd_offset = (int) read_le32(apk, eocd + 16);
-    if (cd_entries > MAX_APK_ENTRIES || cd_offset < 0
-        || cd_offset + cd_size > apk.length) {
+    // SIG_OFFSET (LE uint64) at trailing_start + 8: the authoritative end of
+    // the ELF part. Bounds-checked: must leave at least 1 ELF byte and must
+    // not overrun past the trailing block start.
+    uint64 sig_offset = read_le64(bytes, trailing_start + 8);
+    if (sig_offset < 1 || sig_offset > (uint64) trailing_start) {
         return false;
     }
-    // Walk the central directory to find the named entry.
-    int p = cd_offset;
-    for (int i = 0; i < cd_entries; i++) {
-        if (p + 46 > apk.length) {
-            return false;
-        }
-        if (apk[p] != 0x50 || apk[p + 1] != 0x4b
-            || apk[p + 2] != 0x01 || apk[p + 3] != 0x02) {
-            return false;  // not a central-file header
-        }
-        int method = (int) read_le16(apk, p + 10);
-        int comp_size = (int) read_le32(apk, p + 20);
-        int uncomp_size = (int) read_le32(apk, p + 24);
-        int name_len = (int) read_le16(apk, p + 28);
-        int extra_len = (int) read_le16(apk, p + 30);
-        int comment_len = (int) read_le16(apk, p + 32);
-        int local_offset = (int) read_le32(apk, p + 42);
-        if (p + 46 + name_len + extra_len + comment_len > apk.length) {
-            return false;
-        }
-        // ZIP filenames are NOT NUL-terminated in the archive; copy the
-        // slice into a NUL-terminated buffer before the (string) cast.
-        int nstart = p + 46;
-        var name_buf = new uint8[name_len + 1];
-        Posix.memcpy(name_buf, &apk[nstart], name_len);
-        name_buf[name_len] = 0;
-        string entry_name = (string) name_buf;
-        if (entry_name == name) {
-            return read_local_entry(
-                apk, local_offset, method, comp_size, uncomp_size,
-                out data);
-        }
-        p += 46 + name_len + extra_len + comment_len;
-    }
-    return false;  // entry not found
+    // Signature: 64 raw bytes immediately after the offset field.
+    int sig_off = trailing_start + 16;
+    uint8[] sig = new uint8[64];
+    Posix.memcpy(sig, &bytes[sig_off], 64);
+    // Slice the ELF part and verify the detached ed25519 signature over it.
+    elf_bytes = new uint8[(int) sig_offset];
+    Posix.memcpy(elf_bytes, &bytes[0], (size_t) sig_offset);
+    return trust.verify_signature(elf_bytes, sig);
 }
 
-// Read a local file header at `offset` and extract the entry data. Static:
-// pure function of its inputs (called from the static extract_apk_entry).
-private static bool read_local_entry(uint8[] apk, int offset,
-                                     int method, int comp_size,
-                                     int uncomp_size, out uint8[] data) {
-    data = new uint8[0];
-    if (offset < 0 || offset + 30 > apk.length) {
-        return false;
-    }
-    if (apk[offset] != 0x50 || apk[offset + 1] != 0x4b
-        || apk[offset + 2] != 0x03 || apk[offset + 3] != 0x04) {
-        return false;  // not a local file header
-    }
-    int name_len = (int) read_le16(apk, offset + 26);
-    int extra_len = (int) read_le16(apk, offset + 28);
-    int data_off = offset + 30 + name_len + extra_len;
-    if (data_off < 0 || data_off + comp_size > apk.length) {
-        return false;
-    }
-    int dend = data_off + comp_size;
-    if (method == 0) {
-        // Stored (no compression): the compressed size equals the
-        // uncompressed size; copy verbatim via slice.
-        uint8[] slice = apk[data_off : dend];
-        data = new uint8[slice.length];
-        Posix.memcpy(data, slice, slice.length);
-        return true;
-    }
-    if (method == 8) {
-        // Deflate (raw, no zlib header): inflate via a streaming converter.
-        uint8[] comp = apk[data_off : dend];
-        return inflate_raw(comp, uncomp_size, out data);
-    }
-    return false;  // unsupported method
+// Read an 8-byte little-endian unsigned 64-bit integer at `off`. The only LE
+// reader left after the ZIP reader was removed (the inject payload has one
+// LE field: SIG_OFFSET).
+private static uint64 read_le64(uint8[] b, int off) {
+    uint64 v = 0;
+    v |= (uint64) b[off];
+    v |= (uint64) b[off + 1] << 8;
+    v |= (uint64) b[off + 2] << 16;
+    v |= (uint64) b[off + 3] << 24;
+    v |= (uint64) b[off + 4] << 32;
+    v |= (uint64) b[off + 5] << 40;
+    v |= (uint64) b[off + 6] << 48;
+    v |= (uint64) b[off + 7] << 56;
+    return v;
 }
 
-// Inflate a raw deflate stream (no zlib header) into `out data`. Uses a
-// GZlibDecompressor (RAW format) wrapped in a GConverterInputStream over a
-// MemoryInputStream, reading in small chunks. This bounds peak memory to the
-// entry's uncompressed size (plus one chunk) instead of allocating up to
-// MAX_APK_BYTES per retry iteration as the previous ZlibDecompressor.convert
-// loop did (R4-INJ-01). The output buffer is capped at uncomp_size when the
-// hint is positive and trustworthy; a zero/lying hint falls back to a
-// growable buffer that is still bounded by MAX_APK_BYTES.
-private static bool inflate_raw(uint8[] comp, int64 uncomp_size,
-                                out uint8[] data) {
-    data = new uint8[0];
-    // Output cap: the stored uncompressed size is authoritative for
-    // well-formed APKs. A zero/lying hint is handled by the growable path
-    // below; either way the total output never exceeds MAX_APK_BYTES.
-    size_t out_cap = (size_t) (uncomp_size > 0
-                              ? uncomp_size : comp.length * 4);
-    if (out_cap < 64) {
-        out_cap = 64;
-    }
-    if (out_cap > MAX_APK_BYTES) {
-        return false;
-    }
-    var dec = new ZlibDecompressor(ZlibCompressorFormat.RAW);
-    var min = new MemoryInputStream.from_data(comp);
-    var cin = new ConverterInputStream(min, dec);
-    // Read in 64 KiB chunks; grow the output buffer only if the hint was
-    // too small (uncomp_size == 0 or lying), still capped at MAX_APK_BYTES.
-    const size_t CHUNK = 65536;
-    var out_buf = new uint8[out_cap];
-    size_t total = 0;
-    var tmp = new uint8[CHUNK];
-    try {
-        while (true) {
-            ssize_t n = cin.read(tmp);
-            if (n == 0) {
-                break;  // EOF: stream fully inflated
-            }
-            if (total + n > out_cap) {
-                // Hint was too small: grow (only the growable path reaches
-                // here; a positive trustworthy hint that underflows means a
-                // corrupt stream and is rejected). Double until `need` fits,
-                // clamping at MAX_APK_BYTES: if `need` still exceeds the cap
-                // the stream is genuinely too large.
-                size_t need = total + (size_t) n;
-                while (need > out_cap) {
-                    out_cap *= 2;
-                    if (out_cap > MAX_APK_BYTES) {
-                        // Clamp to the cap rather than overshooting. If
-                        // `need` still exceeds the cap, the stream is
-                        // genuinely too large and is rejected.
-                        out_cap = (size_t) MAX_APK_BYTES;
-                        if (need > out_cap) {
-                            return false;
-                        }
-                        break;
-                    }
-                }
-                var grown = new uint8[out_cap];
-                Posix.memcpy(grown, out_buf, total);
-                out_buf = grown;
-            }
-            Posix.memcpy(&out_buf[total], tmp, (size_t) n);
-            total += (size_t) n;
-        }
-    } catch (Error e) {
-        return false;
-    }
-    if (total == 0) {
-        return false;  // empty inflate is not a valid APK entry
-    }
-    data = out_buf[0 : total];
-    return true;
-}
-
-private static int read_le16(uint8[] b, int off) {
-    return (int) b[off] | ((int) b[off + 1] << 8);
-}
-
-private static int read_le32(uint8[] b, int off) {
-    return (int) b[off] | ((int) b[off + 1] << 8)
-           | ((int) b[off + 2] << 16)
-           | ((int) b[off + 3] << 24);
-}
 
 private static string safe_string(Json.Object obj, string name,
                                   string def = "") {

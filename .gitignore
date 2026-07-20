@@ -19,5 +19,10 @@ test/fixtures/release-manifest-bad-entry.json.sig
 test/fixtures/release-manifest-bad-channel.json
 test/fixtures/release-manifest-bad-channel.json.sig
 test/fixtures/voboost-inject
+test/fixtures/voboost-inject-elf
+test/fixtures/voboost-inject-bad-sig
+test/fixtures/voboost-inject-no-magic
+test/fixtures/voboost-inject-truncated
+test/fixtures/voboost-inject-bad-offset
 subprojects/.wraplock
 code-review-*.md
