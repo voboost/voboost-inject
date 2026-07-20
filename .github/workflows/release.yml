@@ -98,38 +98,6 @@ jobs:
       - name: Strip device binary
         run: llvm-strip build-android/voboost-inject
 
-      # Build the daemon's per-agent manifest (manifest.json) and sign it with
-      # the release key (same ed25519 key family as EMBEDDED_PUBKEY, design D7).
-      # The per-agent manifest rides inside the app APK (docs/17-ota-architecture.md
-      # §4.1), not inside the inject payload; the inject payload is a single
-      # appended-sig ELF and carries no manifest. The daemon version is read from
-      # meson.build; the agents list is empty for now (none shipped yet).
-      - name: Build and sign daemon manifest
-        env:
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        run: |
-          test -n "$SIGNING_KEY" || {
-            echo "release: SIGNING_KEY secret is empty; set it before tagging a release" >&2
-            exit 1
-          }
-          version=$(meson introspect build --projectinfo \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
-          mkdir -p build
-          cat > build/manifest.json <<JSON
-          {
-            "version": 1,
-            "daemon": "$version",
-            "agents": []
-          }
-          JSON
-          umask 077
-          keyfile=$(mktemp)
-          trap 'rm -f "$keyfile"' EXIT
-          printf '%s' "$SIGNING_KEY" > "$keyfile"
-          make sign KEY="$keyfile" FILE=build/manifest.json
-          make verify-sig KEY=config/release-public.pem FILE=build/manifest.json
-          rm -f "$keyfile"
-
       # Build the signed inject payload: the stripped daemon ELF carrying an
       # appended ed25519 signature in trailing bytes (VOBSIG1 magic + LE uint64
       # SIG_OFFSET + 64-byte sig over the ELF). The daemon's
