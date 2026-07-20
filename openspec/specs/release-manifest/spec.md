@@ -66,32 +66,19 @@ manifest exceeding either bound SHALL be rejected.
 - **THEN** the client rejects it and performs no update
 
 ### Requirement: Streaming APK entry inflate
+The daemon's inject-payload reader SHALL verify an appended ed25519 signature
+over the ELF bytes of the staged inject file (trailing `VOBSIG1` block), not
+inflate a ZIP entry. There is no APK ZIP reader, no central-directory walk, no
+deflate/inflate path, and no per-entry uncompressed-size handling in the
+trusted code path. The trailing 64-byte raw ed25519 signature is verified via
+Monocypher's `Ed25519.check` (detached, over the raw ELF bytes — the library
+hashes internally with SHA-512); the daemon does not compute a separate sha256
+for signature verification.
 
-The daemon's APK ZIP reader SHALL inflate deflated entries (method 8) via a
-streaming converter (`GConverterInputStream` over a `MemoryInputStream` with a
-`GZlibDecompressor` in RAW format) reading in fixed-size chunks, so that the
-peak memory of the inflate is bounded by the entry's uncompressed size plus
-one chunk, not by `MAX_APK_BYTES`. The output buffer SHALL be sized at the
-entry's stored uncompressed size; a zero or lying hint SHALL fall back to a
-growable buffer still capped at `MAX_APK_BYTES`.
-
-Context: the previous `ZlibDecompressor.convert` retry loop allocated a fresh
-output buffer up to `MAX_APK_BYTES` (64 MiB) per iteration. The APK is
-signature-verified before apply and the bound is 64 MiB, so the old code was
-acceptable; streaming removes the per-iteration peak entirely as
-defense-in-depth (R4-INJ-01).
-
-#### Scenario: Deflated entry with a trustworthy uncompressed size
-- **WHEN** the ZIP reader extracts a method-8 entry whose stored
-  `uncomp_size` is positive and matches the stream
-- **THEN** the inflate allocates a buffer of `uncomp_size` bytes and reads
-  the compressed slice in 64 KiB chunks through the streaming converter
-- **AND** the peak memory is `uncomp_size + 64 KiB`, never `MAX_APK_BYTES`
-
-#### Scenario: Deflated entry with a zero or lying uncompressed size
-- **WHEN** the stored `uncomp_size` is zero or smaller than the actual
-  inflated output
-- **THEN** the inflate grows the output buffer (doubling) and retries, still
-  capped at `MAX_APK_BYTES`
-- **AND** returns false if the grown buffer would exceed `MAX_APK_BYTES`
+#### Scenario: Appended signature over the ELF bytes
+- **WHEN** the daemon reads the staged inject file
+- **THEN** it locates the trailing block by the `VOBSIG1` magic, reads
+  `SIG_OFFSET`, slices the ELF bytes `[0..SIG_OFFSET)`, and verifies the
+  64-byte signature over those bytes against `EMBEDDED_PUBKEY` — no ZIP
+  parsing and no inflate step is involved
 
