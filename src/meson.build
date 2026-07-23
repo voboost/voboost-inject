@@ -84,6 +84,18 @@ embedded_pubkey = custom_target(
   ],
 )
 
+# frida-java-bridge JS: frida-core 17.x does not bundle the Java bridge in the
+# built agent for our configuration, so the daemon inlines it and prepends it
+# to every agent script at create_script time (see frida_controller.vala).
+# The bridge source (config/java-bridge.js) is the frida-tools bridges/java.js.
+node_bin = find_program('node', native: true)
+embedded_java_bridge = custom_target(
+  'embedded-java-bridge',
+  input: meson.project_source_root() / 'config/java-bridge.js',
+  output: 'embedded_java_bridge.vala',
+  command: [node_bin, meson.project_source_root() / 'tools/gen-java-bridge.js', '@INPUT@', '@OUTPUT@'],
+)
+
 inject_sources = files(
   'ed25519.vapi',
   'frida-stubs.vapi',
@@ -106,6 +118,7 @@ executable(
   'voboost-inject',
   inject_sources,
   embedded_pubkey,
+  embedded_java_bridge,
   version_vala,
   frida_core_vapi,
   dependencies: inject_deps,

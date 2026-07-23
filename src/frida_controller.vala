@@ -425,6 +425,20 @@ private async bool load_js(
     // copy it builds from these bytes is identical to the on-disk file.
     string source = (string) data;
 
+    // Prepend the Java bridge: frida-core 17.x does not bundle frida-java-
+    // bridge in our agent build, so globalThis.Java is absent and agents
+    // that use Java.perform fail with "'Java' is not defined". The daemon
+    // inlines the bridge (JAVA_BRIDGE_JS) and exposes it synchronously,
+    // mirroring how frida-tools' CLI exposes the bridge via Script.evaluate
+    // with a wrapper that runs the bridge (defining `var bridge`), then
+    // assigns it to globalThis.Java via Object.defineProperty before the
+    // agent code runs. defineProperty (not `=`) matches the CLI exactly;
+    // plain assignment left Java.use returning null (bridge object present
+    // but its ART state not wired through the property descriptor).
+    source = "(function () { " + JAVA_BRIDGE_JS
+        + "Object.defineProperty(globalThis, 'Java', { value: bridge });"
+        + " })();\n" + source;
+
     var script = yield create_script_bounded(session, source, agent.id);
     if (script == null) {
         return false;
