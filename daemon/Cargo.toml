@@ -1,0 +1,40 @@
+[package]
+name = "voboost-inject"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "voboost-inject"
+path = "src/main.rs"
+
+[dependencies]
+# Tokio async runtime
+tokio = { version = "1", features = ["full"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# File system watching (inotify)
+notify = "6"
+# Unix system calls (ptrace, signals, proc)
+nix = { version = "0.27", features = ["process", "signal", "fs", "user", "ptrace"] }
+# ed25519 signature verification
+ed25519-dalek = "2"
+# SHA-256
+sha2 = "0.10"
+# Logging
+log = "0.4"
+env_logger = "0.11"
+# Error handling
+anyhow = "1"
+# Hex encoding
+hex = "0.4"
+
+[build-dependencies]
+# build.rs: embed EMBEDDED_PUBKEY, generate version
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = false
+strip = true
