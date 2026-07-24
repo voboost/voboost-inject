@@ -1,0 +1,351 @@
+/*
+ * injector.c — hybrid ptrace injector (C), the daemon's native injection rail.
+ *
+ * Injects a .so into a target process via ptrace + remote dlopen, then makes
+ * an explicit remote-call to an entry symbol (e.g. implant_init).
+ *
+ * Proven mechanism (PoC, vendor-Android 9, kernel 4.14.156-perf+):
+ *   - bitness detection from /proc/<pid>/exe (app_process32/app_process64)
+ *     with /proc/<pid>/maps /lib64/ scan fallback
+ *   - remote call via PTRACE_CONT + LR=0 trap (SINGLESTEP/hw-bp do NOT work
+ *     on this kernel — AndKittyInjector rejected for that reason)
+ *   - cross-bitness regsets: arm64_regs (64) / user_regs (32, Thumb bit)
+ *   - __loader_dlopen (NOT libdl dlopen, which loses arguments)
+ *   - caller_addr inside app_process for namespace resolution
+ *   - .so path written ~8KB below SP (closer is clobbered by call frame)
+ *   - explicit remote-call to init_sym (ctors don't run under ptrace-dlopen)
+ *
+ * See native-payload spec for the full contract.
+ */
+
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+#include <sys/uio.h>
+#include <sys/mman.h>
+#include <signal.h>
+#include <stdint.h>
+
+#include "injector.h"
+
+/* ---- internal types from regs.c ---- */
+
+struct arm64_regs {
+    unsigned long long regs[31]; /* x0..x30 */
+    unsigned long long sp;
+    unsigned long long pc;
+    unsigned long long pstate;
+};
+
+/* ---- internal decls from elf_resolve.c ---- */
+
+typedef unsigned long long u64;
+
+int  target_read_mem(int pid, u64 addr, void *buf, size_t len);
+int  target_write_mem(int pid, u64 addr, const void *buf, size_t len);
+int  target_verify_mem(int pid, u64 addr, const void *expected, size_t len);
+u64  find_linker64_rxp_base(int pid);
+u64  find_target_caller_addr(int pid);
+u64  resolve_loader_symbol(int pid, const char *sym_name);
+
+/* ---- bitness detection ---- */
+
+/*
+ * Detect the target process bitness at runtime.
+ *
+ * Checks /proc/<pid>/exe for app_process32 vs app_process64, then falls
+ * back to scanning /proc/<pid>/maps for /lib64/.
+ *
+ * Returns: 64, 32, or 0 on failure (native-payload: bitness MUST be
+ * detected per-injection, never from a static agent→bitness table).
+ */
+static int detect_bitness(int pid) {
+    char exe_path[64];
+    char buf[512];
+    ssize_t n;
+
+    /* Method 1: readlink /proc/<pid>/exe */
+    snprintf(exe_path, sizeof(exe_path), "/proc/%d/exe", pid);
+    n = readlink(exe_path, buf, sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        if (strstr(buf, "app_process32") || strstr(buf, "app_process32_real"))
+            return 32;
+        if (strstr(buf, "app_process64") || strstr(buf, "app_process"))
+            return 64;
+    }
+
+    /* Method 2: scan maps for /lib64/ (64-bit) vs absence (32-bit) */
+    char maps_path[64];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *f = fopen(maps_path, "r");
+    if (!f) return 0;
+    while (fgets(buf, sizeof(buf), f)) {
+        if (strstr(buf, "/lib64/")) {
+            fclose(f);
+            return 64;
+        }
+    }
+    fclose(f);
+    /* No /lib64/ found — likely 32-bit */
+    return 32;
+}
+
+/* ---- 64-bit remote call ---- */
+
+/*
+ * Call a function in a 64-bit target via ptrace.
+ * Sets x0..x7 for up to 8 args, LR=0 (trap on return), PC=func_addr.
+ * Resumes with PTRACE_CONT; catches SIGSEGV-at-0 as the return signal.
+ * Returns the x0 (return value) of the called function.
+ */
+static u64 remote_call64(int pid, u64 func_addr, u64 args[], int nargs) {
+    struct arm64_regs regs;
+    struct iovec iov = { &regs, sizeof(regs) };
+
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0)
+        return 0;
+
+    struct arm64_regs orig = regs; /* save for restore */
+
+    /* Set arguments x0..x7 */
+    for (int i = 0; i < nargs && i < 8; i++)
+        regs.regs[i] = args[i];
+
+    /* LR=0: function returns to address 0 → SIGSEGV = call completed */
+    regs.regs[30] = 0;
+
+    /* Align SP to 16 bytes (AArch64 ABI) and make room for call frame */
+    regs.sp = (regs.sp & ~0xFULL) - 256;
+
+    regs.pc = func_addr;
+
+    iov.iov_len = sizeof(regs);
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0)
+        return 0;
+
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0)
+        return 0;
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    /* Read result: x0 holds the return value */
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0) {
+        /* Restore on error */
+        iov.iov_len = sizeof(orig);
+        memcpy(&regs, &orig, sizeof(orig));
+        ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
+        return 0;
+    }
+    u64 result = regs.regs[0];
+
+    /* Restore original registers */
+    iov.iov_len = sizeof(orig);
+    memcpy(&regs, &orig, sizeof(orig));
+    ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
+
+    return result;
+}
+
+/* ---- 32-bit remote call ---- */
+
+/*
+ * ARM 32-bit user_regs (EABI).
+ *   uregs[0]  = r0 (return value)
+ *   uregs[13] = sp
+ *   uregs[14] = lr
+ *   uregs[15] = pc (Thumb bit: bit 0 set if Thumb mode)
+ */
+struct user_regs_32 {
+    unsigned long uregs[18];
+};
+
+static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
+    struct user_regs_32 regs;
+    struct iovec iov = { &regs, sizeof(regs) };
+
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0)
+        return 0;
+
+    struct user_regs_32 orig = regs;
+
+    /* Set arguments r0..r3 (ARM calling convention: first 4 in registers) */
+    for (int i = 0; i < nargs && i < 4; i++)
+        regs.uregs[i] = (unsigned long)args[i];
+
+    /* LR=0: function returns to address 0 → SIGSEGV = call completed */
+    regs.uregs[14] = 0;
+
+    /* Align SP to 8 bytes (ARM EABI) */
+    regs.uregs[13] = (regs.uregs[13] & ~0x7UL) - 256;
+
+    /* Set PC; Thumb bit (bit 0) if target is in Thumb mode */
+    regs.uregs[15] = (unsigned long)func_addr;
+    /* If original PC had Thumb bit set, preserve it */
+    if (orig.uregs[15] & 1)
+        regs.uregs[15] |= 1;
+
+    iov.iov_len = sizeof(regs);
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0)
+        return 0;
+
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0)
+        return 0;
+
+    int status;
+    waitpid(pid, &status, 0);
+
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0) {
+        iov.iov_len = sizeof(orig);
+        memcpy(&regs, &orig, sizeof(orig));
+        ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
+        return 0;
+    }
+
+    u64 result = regs.uregs[0]; /* r0 = return value */
+
+    /* Restore */
+    iov.iov_len = sizeof(orig);
+    memcpy(&regs, &orig, sizeof(orig));
+    ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
+
+    return result;
+}
+
+/* ---- main injection entry ---- */
+
+/*
+ * vbi_inject — inject a .so into a target process via ptrace.
+ *
+ * Returns 0 on success, negative on error (see injector.h).
+ */
+int vbi_inject(int pid, const char *so_path, const char *init_sym) {
+    if (!so_path || pid <= 0)
+        return -1;
+
+    /* 1. Attach to the target. */
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0)
+        return -1; /* denied (permission or SELinux) */
+
+    int status;
+    int ret = -1;
+    waitpid(pid, &status, 0);
+
+    if (WIFEXITED(status)) {
+        ret = -2; /* target gone */
+        goto detach;
+    }
+
+    /* 2. Detect target bitness at runtime. */
+    int bitness = detect_bitness(pid);
+    if (bitness != 32 && bitness != 64) {
+        ret = -5; /* bitness detection failed */
+        goto detach;
+    }
+
+    /* 3. Resolve __loader_dlopen in the target. */
+    u64 dlopen_addr = resolve_loader_symbol(pid, "__loader_dlopen");
+    if (!dlopen_addr) {
+        ret = -3; /* dlopen failed (can't even find dlopen) */
+        goto detach;
+    }
+
+    /* 4. Find caller_addr inside app_process (for namespace resolution). */
+    u64 caller_addr = find_target_caller_addr(pid);
+
+    /* 5. Write the .so path string ~8KB below SP (safe from call frame). */
+    u64 str_addr = 0;
+    size_t path_len = strlen(so_path) + 1;
+
+    if (bitness == 64) {
+        struct arm64_regs regs;
+        struct iovec iov = { &regs, sizeof(regs) };
+        ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
+        u64 sp = regs.sp & ~0xFULL;
+        str_addr = sp - 8192;
+    } else {
+        struct user_regs_32 regs;
+        struct iovec iov = { &regs, sizeof(regs) };
+        ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
+        u64 sp = regs.uregs[13] & ~0x7ULL;
+        str_addr = sp - 8192;
+    }
+
+    if (target_write_mem(pid, str_addr, so_path, path_len) < 0) {
+        ret = -3;
+        goto detach;
+    }
+
+    /* 6. Call __loader_dlopen(so_path, RTLD_NOW, caller_addr). */
+    u64 args[3] = { str_addr, 2 /* RTLD_NOW */, caller_addr };
+    u64 handle;
+
+    if (bitness == 64)
+        handle = remote_call64(pid, dlopen_addr, args, 3);
+    else
+        handle = remote_call32(pid, dlopen_addr, args, 3);
+
+    if (handle == 0) {
+        /* dlopen failed — try to get dlerror for diagnostics. */
+        u64 dlerror_addr = resolve_loader_symbol(pid, "__loader_dlerror");
+        if (dlerror_addr) {
+            u64 dlerr_result;
+            if (bitness == 64)
+                dlerr_result = remote_call64(pid, dlerror_addr, NULL, 0);
+            else
+                dlerr_result = remote_call32(pid, dlerror_addr, NULL, 0);
+            (void)dlerr_result; /* could read the error string for logging */
+        }
+        ret = -3; /* dlopen failed */
+        goto detach;
+    }
+
+    /* 7. Explicit remote-call to init_sym (ctors don't run under ptrace-dlopen). */
+    if (init_sym) {
+        u64 dlsym_addr = resolve_loader_symbol(pid, "__loader_dlsym");
+        if (dlsym_addr) {
+            /* Write the symbol name string into target memory. */
+            size_t sym_len = strlen(init_sym) + 1;
+            u64 sym_str_addr = str_addr - sym_len - 16; /* below the path */
+            if (target_write_mem(pid, sym_str_addr, init_sym, sym_len) < 0) {
+                ret = -4;
+                goto detach;
+            }
+
+            /* dlsym(handle, init_sym, caller_addr) */
+            u64 sym_args[3] = { handle, sym_str_addr, caller_addr };
+            u64 init_addr;
+            if (bitness == 64)
+                init_addr = remote_call64(pid, dlsym_addr, sym_args, 3);
+            else
+                init_addr = remote_call32(pid, dlsym_addr, sym_args, 3);
+
+            if (init_addr == 0) {
+                ret = -4; /* init symbol not found */
+                goto detach;
+            }
+
+            /* Call init_addr(cfg). The config path is passed as x0/r0.
+             * For the initial port we pass the same so_path as cfg
+             * (the real config path is delivered via channel B — the
+             * daemon passes it separately in injection-control). */
+            u64 init_args[1] = { str_addr };
+            if (bitness == 64)
+                remote_call64(pid, init_addr, init_args, 1);
+            else
+                remote_call32(pid, init_addr, init_args, 1);
+        }
+    }
+
+    ret = 0; /* success */
+
+detach:
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    return ret;
+}
