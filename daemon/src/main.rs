@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod plan;
 pub mod process_watcher;
 pub mod reconcile;
+pub mod release_manifest;
 pub mod safety;
 pub mod status;
 pub mod trust;

@@ -56,6 +56,16 @@ pub fn manifest_sig_file() -> String {
     format!("{ROOT_ZONE}/manifest.sig")
 }
 
+/// Path to the root-zone release manifest (native-payload integrity envelope).
+pub fn release_manifest_file() -> String {
+    format!("{ROOT_ZONE}/release-manifest.json")
+}
+
+/// Path to the root-zone release manifest signature (detached ed25519).
+pub fn release_manifest_sig_file() -> String {
+    format!("{ROOT_ZONE}/release-manifest.json.sig")
+}
+
 /// Device-safety defaults (ported from Vala main.vala).
 pub const SAFETY_MAX_ATTEMPTS: u32 = 3;
 pub const SAFETY_WINDOW_MIN: u32 = 5;

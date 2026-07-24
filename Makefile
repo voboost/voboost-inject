@@ -282,9 +282,18 @@ release-manifest:
 	    sha=$$(openssl dgst -sha256 -hex "$$f" | awk '{ print $$NF }'); \
 	    sz=$$(stat -c%s "$$f" 2>/dev/null || stat -f%z "$$f" 2>/dev/null); \
 	    jsonesc=$$(printf '%s' "$$rel" | sed 's/\\/\\\\/g; s/"/\\"/g'); \
+	    abi=; case "/$$rel/" in \
+	      */arm64-v8a/*)   abi=arm64-v8a;; \
+	      */armeabi-v7a/*) abi=armeabi-v7a;; \
+	    esac; \
 	    [ "$$first" = 1 ] || printf ',\n'; first=0; \
-	    printf '    {"path":"%s","channel":"$(CHANNEL)","sha256":"%s","size":%s,"version":"$(VERSION)"}' \
-	      "$$jsonesc" "$$sha" "$$sz"; \
+	    if [ -n "$$abi" ]; then \
+	      printf '    {"path":"%s","channel":"$(CHANNEL)","sha256":"%s","size":%s,"version":"$(VERSION)","abi":"%s"}' \
+	        "$$jsonesc" "$$sha" "$$sz" "$$abi"; \
+	    else \
+	      printf '    {"path":"%s","channel":"$(CHANNEL)","sha256":"%s","size":%s,"version":"$(VERSION)"}' \
+	        "$$jsonesc" "$$sha" "$$sz"; \
+	    fi; \
 	  done; \
 	  printf '\n  ]\n'; \
 	  echo '}'; \
