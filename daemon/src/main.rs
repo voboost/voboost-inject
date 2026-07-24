@@ -5,6 +5,7 @@
 // The full lifecycle (state machine, SIGTERM handling, boot trigger) is
 // completed in Wave 1.2 (daemon-lifecycle).
 
+pub mod boot;
 pub mod config;
 pub mod injector;
 pub mod log;
@@ -145,23 +146,39 @@ fn write_degraded_status() {
 }
 
 /// Run the daemon loop: poll /proc, reconcile, inject, monitor.
+///
+/// daemon-lifecycle: runs on the main thread (blocking poll). SIGTERM is
+/// caught by a signal handler that sets a shutdown flag — the poll loop
+/// checks it each iteration and exits cleanly WITHOUT tearing down hooks
+/// (injected code outlives the daemon).
 fn run_daemon(manifest: manifest::Manifest) {
     let mut safety = safety::Safety::new();
     let mut watcher = process_watcher::ProcessWatcher::new();
+    let boot_state = boot::BootState::new();
     let mut status = status::Status::default();
     status.daemon_version = DAEMON_VERSION.to_string();
     status.daemon_state = "ready".to_string();
     status.manifest_version = manifest.manifest_version;
 
+    // Install SIGTERM handler — sets the shutdown flag, does NOT kill hooks.
+    install_sigterm_handler();
+
     log::ok("main", "daemon loop started (ptrace injection, /proc polling)");
 
-    // Initial injection pass.
+    // Initial injection pass (reconcile first).
     inject_all_targets(&manifest, &mut safety, &mut watcher, &mut status);
     status.write_atomic();
 
     // Poll loop.
     let poll_interval = std::time::Duration::from_secs(2);
     loop {
+        // Check shutdown flag (set by SIGTERM handler).
+        if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            log::info("main", "SIGTERM: clean shutdown (hooks left running)");
+            release_lock();
+            break;
+        }
+
         std::thread::sleep(poll_interval);
 
         // Reload plan (detect changes).
@@ -208,6 +225,9 @@ fn run_daemon(manifest: manifest::Manifest) {
             log::err("main", "panic-quarantine active");
         }
 
+        // Check boot completion for boot-deferred agents.
+        let boot_done = boot_state.boot_completed();
+
         // Inject new appearances.
         for (process, pid) in &appeared {
             // Skip degraded targets.
@@ -227,6 +247,20 @@ fn run_daemon(manifest: manifest::Manifest) {
                 log::info("main", &format!("coexistence skip: {process} pid={pid}"));
                 status.set_injection("", process, status::InjectionState::SkippedCoexist);
                 continue;
+            }
+
+            // Boot-readiness gate: agents with boot:true wait for boot_completed.
+            if !boot_done {
+                // Check if this process has any boot-deferred agents.
+                let has_boot_agents = manifest
+                    .agents
+                    .iter()
+                    .any(|a| a.process == *process && a.requires_boot);
+                if has_boot_agents {
+                    log::debug("main", &format!("boot-deferred: {process} pid={pid} waiting"));
+                    status.set_injection("", process, status::InjectionState::Waiting);
+                    continue;
+                }
             }
 
             // Detect bitness → select ABI.
@@ -253,6 +287,23 @@ fn run_daemon(manifest: manifest::Manifest) {
         }
 
         status.write_atomic();
+    }
+}
+
+/// Global shutdown flag, set by the SIGTERM handler.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Install a SIGTERM handler that sets the shutdown flag.
+/// The poll loop checks it each iteration and exits cleanly.
+/// SIGTERM does NOT tear down hooks — injected code outlives the daemon.
+extern "C" fn handle_sigterm(_sig: i32) {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn install_sigterm_handler() {
+    unsafe {
+        libc::signal(libc::SIGTERM, handle_sigterm as libc::sighandler_t);
     }
 }
 
