@@ -2,71 +2,40 @@
 Specify how the daemon drives frida-core for injection: in-process local device, spawn-gating,
 per-agent runtime routing, process watching, plan validation, and opaque config delivery.
 ## Requirements
-### Requirement: In-process frida-core driving
-The daemon SHALL embed frida-core and drive it in-process over a local device, with no socket
-and no per-injection process exec. It SHALL support multiple sessions, one per target process.
-
-#### Scenario: Local device control
-- **WHEN** the daemon needs to inject
-- **THEN** it uses the embedded frida-core local device API directly,
-  opening no socket and exec'ing no helper binary
-
-### Requirement: Spawn-gating for earliest injection
-The daemon SHALL spawn-gate not-yet-started targets so that injection happens before the target
-runs its own code, and SHALL attach to targets that are already running. Because frida-core's
-spawn-gating is **global** (it suspends every process the device spawns, with no per-program
-filter), the daemon SHALL resume a non-target gated process immediately WITHOUT attaching a
-session, so enabling spawn-gating adds no per-process attach cost to the rest of the device.
-
-#### Scenario: Target not yet started
-- **WHEN** a spawn-gated target process is created
-- **THEN** the daemon injects its agents before the process executes its own code, then resumes it
-
-#### Scenario: Target already running
-- **WHEN** a target process is already running at READY time
-- **THEN** the daemon attaches to it and injects its agents
-
-#### Scenario: Non-target process is spawn-gated
-- **WHEN** global spawn-gating suspends a process that is not a target of any enabled agent
-- **THEN** the daemon resumes it immediately without attaching a session, and never tracks it as a
-  target
-
-### Requirement: Per-agent runtime routing and per-process lazy runtime
-The daemon SHALL run every agent as JavaScript on frida-core's QuickJS runtime
-(GumJS) via a per-process session script (`create_script`). Every target
-process that receives at least one agent SHALL be attached (a session opened)
-and the QuickJS runtime SHALL be loaded in it. A process that receives no agent
-SHALL never be attached (it is resumed immediately — see Spawn-gating).
-
-#### Scenario: Process receives no agent
-- **WHEN** a spawned process is not a target of any enabled agent
-- **THEN** frida is never attached to it and no runtime is loaded in it
-
-#### Scenario: Process receives an agent
-- **WHEN** a target process receives an agent
-- **THEN** the QuickJS runtime is loaded in that process and the agent runs on it
-
 ### Requirement: Process watching and bounded reinjection
-The daemon SHALL watch for target processes via process events (not polling): injecting on spawn,
-and reinjecting on target death subject to the device-safety rate-limit and quarantine rules.
+
+The daemon SHALL watch for target processes by polling `/proc` (there are no
+frida process events), injecting when a target appears and reinjecting after a
+target dies and reappears, subject to the device-safety rate-limit and
+quarantine rules. Target death SHALL be detected by the disappearance of
+`/proc/<pid>` (frida's `Session.detached` / `process_crashed` signals are gone).
+Reinjection SHALL be idempotent against the maps marker: a target already
+carrying the `libimplant.so` marker is not re-injected.
 
 #### Scenario: Target appears after READY
-- **WHEN** a watched target process spawns
-- **THEN** the daemon injects its agents as soon as it appears
+
+- **WHEN** a watched target process appears in `/proc`
+- **THEN** the daemon injects its agents once, provided the maps marker is not
+  already present
 
 #### Scenario: Target dies and is restarted
-- **WHEN** a watched target dies and reappears within the allowed reinjection budget
+
+- **WHEN** a watched target's `/proc/<pid>` disappears and the process
+  reappears within the allowed reinjection budget
 - **THEN** the daemon reinjects its agents
 
-NOTE: `js` targets surface death via the frida `Session.detached` signal; `native`-only targets
-(no session) surface a crash via the device `process_crashed` signal. Robust restart-detection for
-clean exits of `native`-only targets is refined in the JS→native migration change.
+#### Scenario: Re-injection into a still-injected target is idempotent
 
-#### Scenario: Re-injection into a still-running target is idempotent
-- **WHEN** a plan change triggers re-injection into a target whose session already holds some of
-  those agents
-- **THEN** the daemon reuses the existing session and loads only the agents not already loaded,
-  never opening a second session or loading an already-active agent twice
+- **WHEN** a plan change or process event would re-inject a target whose
+  `/proc/<pid>/maps` already shows the `libimplant.so` marker
+- **THEN** the daemon does not inject again; it only updates config over
+  channel B
+
+#### Scenario: /proc scan tolerates races
+
+- **WHEN** a `/proc/<pid>` entry disappears mid-scan (process exited)
+- **THEN** the watcher skips that entry and continues, rather than failing the
+  whole pass
 
 ### Requirement: Injection plan validation
 The daemon SHALL validate every entry of the app-written injection plan (`inject.json`) against the
@@ -89,126 +58,160 @@ schema); config semantics belong to the app and the agent.
   (a memory/DoS guard, not a schema check)
 
 ### Requirement: Opaque config delivery to agents
-The daemon SHALL deliver each agent's validated `config` verbatim, without interpreting it. It
-SHALL call the agent's `rpc.exports.init(stage, parameters)` with `parameters.config` set to the
-config, implementing the `frida:rpc` protocol over `Script.post`/`message`.
 
-#### Scenario: Agent receives config via RPC init
-- **WHEN** an agent is loaded
-- **THEN** the daemon calls its `rpc.exports.init` with `parameters.config`
-  set to the agent's config
+The daemon SHALL deliver each agent's validated `config` verbatim by writing it
+to the target's channel-B config file, whose path it passes to `implant_init`
+at injection and rewrites atomically for live updates thereafter (channel-B
+transport mechanics are owned by `update-planes`; the Java consumption seam is
+owned by `agent-entry-seam`). The daemon SHALL treat `config` as **opaque** — it
+SHALL NOT inspect or interpret its contents (no parameter schema); config
+semantics belong to the app and the agent. There is no frida `rpc.exports.init`.
 
-### Requirement: Emulator spawn-gating escape hatch
+#### Scenario: Agent receives config via the channel-B file
 
-The daemon SHALL provide a `VOBOOST_SKIP_SPAWN_GATING` environment-variable
-escape hatch that, when set to `1`, skips the `enable_spawn_gating` call
-entirely so the daemon survives in attach-only mode for emulator integration
-testing. The escape hatch SHALL NOT be set on production devices. Skipping
-spawn-gating SHALL NOT affect attach injection, which uses Linjector
-(`inject_running` -> `linjector.inject_library_resource`), not Zymbiote.
+- **WHEN** an agent set is injected into a target
+- **THEN** the daemon writes the validated per-process config to the target's
+  channel-B config file and passes its path to `implant_init`, which the agent
+  runtime reads on init
 
-Context: frida-core 17.11.0's embedded local-device `enable_spawn_gating`
-SIGABRTs the daemon on Android API 28 arm64 emulators. The in-process
-Zymbiote prep for zygote loads the `linker64` ELF module, which calls
-`gum_metal_array_append` -> `gum_alloc_n_pages(GUM_PAGE_RW)` ->
-`g_assert(result != NULL)` -> `abort()`. The abort is in C (frida-gum) and
-cannot be caught by Vala `try/catch`, so the documented attach-only graceful
-degradation (`enable_gating()` returning `false`) never runs — the process is
-gone before the `yield` returns. The escape hatch mirrors the existing
-`VOBOOST_BOOT_COMPLETED` test hatch: an emulator-only test affordance.
-Production runs on real hardware where the frida-gum `g_assert` does not fire.
-The root cause is a frida-gum design choice (OOM-is-fatal in the
-metal-allocator); a real fix belongs upstream (a `gum_metal_array` try-variant
-with `GError` propagation through `gum_elf_module_load`) and is tracked as
-future work.
+#### Scenario: Config is live-updated atomically
 
-#### Scenario: Emulator with escape hatch set
-- **WHEN** the daemon starts on an Android API 28 arm64 emulator with
-  `VOBOOST_SKIP_SPAWN_GATING=1` in its environment
-- **THEN** the supervisor skips `enable_spawn_gating`, logs "spawn-gating
-  skipped (VOBOOST_SKIP_SPAWN_GATING=1); attach-only mode", reaches READY, and
-  stays alive
-- **AND** attach injection of running targets continues to work via Linjector
+- **WHEN** a plan change alters the config for an already-injected target
+- **THEN** the daemon rewrites the channel-B config file atomically
+  (write-tmp+rename), and does not re-inject
 
-#### Scenario: Emulator without escape hatch
-- **WHEN** the daemon starts on an Android API 28 arm64 emulator without
-  `VOBOOST_SKIP_SPAWN_GATING` set
-- **THEN** the daemon SIGABRTs at `enable_spawn_gating` (frida-gum
-  `g_assert(result != NULL)` in `gum_alloc_n_pages`) before reaching READY
+#### Scenario: Daemon does not interpret config
 
-#### Scenario: Production device
-- **WHEN** the daemon starts on a production device (real hardware)
-- **THEN** `VOBOOST_SKIP_SPAWN_GATING` is not set, `enable_spawn_gating`
-  succeeds, and spawn-gating operates normally (the frida-gum `g_assert` does
-  not fire on real hardware)
+- **WHEN** the daemon delivers an agent's config
+- **THEN** it passes the bytes verbatim and never parses or validates their
+  semantics (only the size bound of the plan-validation requirement applies)
 
 ### Requirement: Running targets resolved by package id via /proc
 
-The daemon SHALL resolve an already-running target's pid by matching the
-manifest `process` field against frida's `enumerate_processes` `Process.name`
-first, and, on no match, against `/proc/<pid>/cmdline` `argv[0]`. On Android
-frida reports the application label (e.g. "Launcher Stub") as `Process.name`,
-not the package id a plan targets ("com.qinggan.app.launcher"), and exposes no
-package in `Process.parameters`; `/proc/<pid>/cmdline` `argv[0]` IS the package
-id for app processes, so the fallback is what actually resolves app targets.
-The frida-name match SHALL remain first so non-Android / native processes
-(e.g. `system_server`) frida names by id still resolve. The first match wins.
-
-The `/proc/<pid>/cmdline` read SHALL NOT split the file contents on the NUL
-byte. GLib's `g_strsplit` rejects a NUL delimiter (CRITICAL + SIGSEGV), and the
-read is unnecessary anyway: `FileUtils.get_contents` returns a NUL-terminated C
-string, so the first NUL in `/proc/<pid>/cmdline` (which separates argv[0] from
-argv[1]) is already the string terminator — the returned string IS argv[0]. The
-daemon SHALL compare the returned string directly against the manifest
-`process` field.
+The daemon SHALL resolve a target's pid by scanning `/proc` and matching the
+manifest `process` field against `/proc/<pid>/cmdline` `argv[0]`. `argv[0]` is
+the bytes of `/proc/<pid>/cmdline` up to the first NUL byte (which separates
+`argv[0]` from `argv[1]`); the daemon SHALL take that leading token and compare
+it directly against `process`, and SHALL NOT split the file on the NUL byte.
+This resolves both app targets (`argv[0]` is the package id, e.g.
+`com.qinggan.app.launcher`) and native/system targets (`argv[0]` is the binary
+name, e.g. `system_server`). There is no frida `enumerate_processes` name match.
+The scan SHALL tolerate `/proc/<pid>` entries disappearing mid-scan.
 
 #### Scenario: A running app target is resolved and injected
+
 - **WHEN** the plan targets an already-running Android app by package id
   (e.g. `com.qinggan.app.launcher`)
-- **THEN** `find_pid` resolves its pid via `/proc/<pid>/cmdline` `argv[0]`
-  (frida's label-name match misses), the daemon attaches and injects the agent,
-  and `inject-status.json` reports `state: active`
+- **THEN** `find_pid` resolves its pid via `/proc/<pid>/cmdline` `argv[0]`, the
+  daemon injects, and `inject-status.json` reports `state: active`
 
-#### Scenario: A native/system target is resolved via frida name
-- **WHEN** the plan targets a process frida names by id (e.g. `system_server`)
-- **THEN** `find_pid` resolves it from `enumerate_processes` `Process.name`
-  without needing the `/proc` fallback
+#### Scenario: A native/system target is resolved via cmdline
+
+- **WHEN** the plan targets a process whose `argv[0]` is a binary name
+  (e.g. `system_server`)
+- **THEN** `find_pid` resolves it from `/proc/<pid>/cmdline` `argv[0]` the same
+  way, with no frida name lookup
+
+#### Scenario: argv[0] is taken up to the first NUL, not split
+
+- **WHEN** `find_pid` reads `/proc/<pid>/cmdline`
+- **THEN** it takes the bytes up to the first NUL as `argv[0]` and compares that
+  directly against `process`, and does not split the contents on the NUL byte
 
 #### Scenario: /proc scan tolerates races
+
 - **WHEN** a `/proc/<pid>` entry disappears mid-scan (process exited)
 - **THEN** `find_pid` skips that entry and continues, rather than failing the
   whole lookup
 
-#### Scenario: cmdline is compared without a NUL split
-- **WHEN** `find_pid` reads `/proc/<pid>/cmdline` to extract argv[0]
-- **THEN** it compares the returned NUL-terminated string directly against the
-  manifest `process` field, and SHALL NOT call `g_strsplit` (or equivalent) with
-  a NUL delimiter, which would crash the daemon
-
 ### Requirement: 32-bit target process support
-The daemon SHALL be able to inject its agents into **32-bit (armv7)** target processes on a
-mixed-ABI device, not only into 64-bit (arm64) ones. On the target head-unit most system services
-run as 32-bit processes (vehicle settings, system service, IME, bluetooth phone, media,
-keymanager), so the majority of agents are routed at 32-bit targets; a daemon that can only reach
-64-bit processes is not viable on-device. This capability is delivered at build time by the
-`frida-core:compat=auto` option (see `build-and-signing`), which embeds frida's 32-bit helper
-(`frida-helper-32`) and the armv7 `frida-agent.so` in the daemon ELF. At runtime the existing
-`device.attach(pid)` / spawn-gating / `create_script` path is used unchanged — frida selects the
-matching-ABI helper per target process automatically once the helper is present in the binary.
+
+The daemon SHALL be able to inject into both **32-bit (armv7)** and **64-bit
+(arm64)** target processes on a mixed-ABI device. This capability is delivered by
+`native-payload` runtime bitness detection (the injector detects target bitness
+per injection) plus both-ABI payload carriage: the daemon SHALL carry both ABIs
+of `libimplant.so` (and the per-ABI hooker prebuilts) and pass the
+matching-ABI `libimplant.so` path to `vbi_inject` for each target's detected
+bitness. On the target head-unit most system services run as 32-bit processes,
+so a daemon that can only reach 64-bit targets is not viable; an ABI mismatch
+crashes the target. There is no frida `compat=auto` build option.
 
 #### Scenario: 32-bit target is injected
-- **WHEN** the daemon injects an agent into a 32-bit (armv7) target process on the device
-- **THEN** the agent reaches `state: active` (not `state: failed` with
-  `Unable to handle 32-bit processes`), because the daemon binary carries frida's 32-bit helper
 
-#### Scenario: 64-bit target is unaffected
-- **WHEN** the daemon injects an agent into a 64-bit (arm64) target process
-- **THEN** injection behaves exactly as before this capability — the 32-bit helper is present in
-  the binary but is not used for a 64-bit target
+- **WHEN** the injector detects a 32-bit (armv7) target
+- **THEN** the daemon passes the `armeabi-v7a` `libimplant.so` path to
+  `vbi_inject` and the agents reach `state: active`
 
-#### Scenario: Build without the 32-bit helper cannot inject into 32-bit targets
-- **WHEN** the daemon is built with `frida-core:compat=disabled` (the 32-bit helper omitted) and
-  attempts to inject into a 32-bit target process on the device
-- **THEN** the injection fails with `Unable to handle 32-bit processes due to build configuration`,
-  because the binary carries no 32-bit helper (this is the failure mode this capability removes)
+#### Scenario: 64-bit target is injected
+
+- **WHEN** the injector detects a 64-bit (arm64) target
+- **THEN** the daemon passes the `arm64-v8a` `libimplant.so` path and injection
+  proceeds
+
+#### Scenario: Build missing an ABI cannot inject that ABI's targets
+
+- **WHEN** the daemon is built without one ABI's `libimplant.so` and a target of
+  that ABI appears
+- **THEN** injection fails for that target (no matching-ABI payload to load),
+  and the failure is reported rather than injecting a mismatched-ABI payload
+
+### Requirement: Ptrace injection via libinjector
+
+The daemon SHALL inject by calling `libinjector`'s flat C-ABI entry
+`vbi_inject(pid, so_path, init_sym)` (see `native-payload`), opening no socket
+and driving no frida device. It SHALL pass the matching-ABI `libimplant.so`
+path as `so_path` and `"implant_init"` as `init_sym`. The daemon SHALL NOT link
+`libimplant.so` or any LSPlant/Dobby symbol; its only native seam is the
+`extern "C"` call to `libinjector`. The `vbi_inject` return value
+(ok / denied / target-gone / dlopen-failed / init-failed) SHALL be surfaced to
+device-safety for rate-limit and quarantine accounting.
+
+#### Scenario: Daemon injects through the injector
+
+- **WHEN** the daemon needs to inject an agent set into a target
+- **THEN** it calls `vbi_inject(pid, libimplant_<abi>.so, "implant_init")`,
+  opening no socket and using no frida
+
+#### Scenario: Injection failure is accounted by safety
+
+- **WHEN** `vbi_inject` returns a non-ok code (denied / target-gone /
+  dlopen-failed / init-failed)
+- **THEN** the daemon records the outcome for the target and feeds it to the
+  device-safety rate-limit and quarantine logic, and does not treat it as a
+  successful injection
+
+### Requirement: Reconciliation by the libimplant.so maps marker
+
+The daemon SHALL treat injected code as outliving it: `libimplant.so` and its
+agents live in the target independently of the daemon process. On startup and on
+every plan change, for each target the daemon SHALL read `/proc/<pid>/maps` and
+check for
+the real `libimplant.so` path (the `native-payload` idempotency marker). If the
+marker is present the target is already injected: the daemon SHALL NOT
+re-inject, and SHALL only update that target's config over channel B. A daemon
+restart — including an OTA self-update — SHALL reconcile against the marker
+rather than re-inject, and SHALL NOT tear down existing hooks. The daemon SHALL
+NOT drive teardown by exiting; agent teardown is driven by a "no agents" plan
+over channel B (see `update-planes`).
+
+#### Scenario: Startup reconcile skips an already-injected target
+
+- **WHEN** the daemon starts and finds the real `libimplant.so` path in a
+  target's `/proc/<pid>/maps`
+- **THEN** it treats the target as already injected, does not re-inject, and
+  reconciles config over channel B
+
+#### Scenario: Daemon restart does not tear down hooks
+
+- **WHEN** the daemon restarts (crash-restart or OTA self-update) while targets
+  hold live injections
+- **THEN** the injected code keeps running, the daemon reconciles by the maps
+  marker, and there is no teardown storm
+
+#### Scenario: Plan change into an injected target only updates config
+
+- **WHEN** a plan change targets a process whose maps already show the
+  `libimplant.so` marker
+- **THEN** the daemon writes the updated config over channel B and does not open
+  a second injection
 

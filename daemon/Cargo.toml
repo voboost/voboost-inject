@@ -29,6 +29,8 @@ env_logger = "0.11"
 anyhow = "1"
 # Hex encoding
 hex = "0.4"
+# C library bindings (flock, lchown, etc.)
+libc = "0.2"
 
 [build-dependencies]
 # build.rs: embed EMBEDDED_PUBKEY, generate version
