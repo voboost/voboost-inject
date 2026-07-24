@@ -28,6 +28,7 @@ FRIDA_MESON ?= $(PWD)/subprojects/frida-core/releng/meson/meson.py
 PYTHON_FOR_MESON ?= /usr/bin/python3
 
 .PHONY: init setup build lint lint-fix test check key-dev
+.PHONY: build-native build-injector build-implant build-daemon build-new
 
 # From a clean clone to a ready environment, identically locally and in CI.
 # Steps: install OS-package tools + build vala-lint from source, then setup,
@@ -428,3 +429,48 @@ emulator-run:
 	$$a shell "su 0 rm -f /data/local/tmp/voboost-inject.json" 2>/dev/null || true; \
 	echo "emulator-run: app zone ready"; \
 	$$a shell "su 0 cat $(EMU_APP_ZONE)/inject-status.json" 2>/dev/null || true
+
+# ===========================================================================
+# New stack: Rust daemon + C injector + C++ implant (ptrace, no frida)
+# These targets build the NEW code alongside the existing frida daemon.
+# The old frida targets (build, build-android) are untouched (design §11:
+# coexistence during migration).
+# ===========================================================================
+
+# NDK path — required for native builds (C/C++).
+NDK_HOME ?= $(ANDROID_NDK_HOME)
+NDK_BUILD ?= $(NDK_HOME)/ndk-build
+PREBUILT_DIR ?= $(PWD)/prebuilt
+
+# ---- build the C injector (libinjector.a) ----
+# A static archive linked into the Rust daemon via build.rs FFI.
+build-injector:
+	@test -n "$(NDK_HOME)" || { echo "build-injector: ANDROID_NDK_HOME not set" >&2; exit 1; }
+	@echo "build-injector: building libinjector.a (C, arm64-v8a)"
+	cd injector && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_APPLICATION_MK=Application.mk
+	@echo "build-injector: done -> injector/libs/arm64-v8a/libinjector.a"
+
+# ---- build the C++ implant (libimplant.so, per-ABI) ----
+# The in-process loader. Both ABIs produced (the daemon selects at runtime).
+build-implant:
+	@test -n "$(NDK_HOME)" || { echo "build-implant: ANDROID_NDK_HOME not set" >&2; exit 1; }
+	@echo "build-implant: building libimplant.so (C++, arm64-v8a + armeabi-v7a)"
+	cd implant && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_APPLICATION_MK=Application.mk
+	@echo "build-implant: done -> implant/libs/{arm64-v8a,armeabi-v7a}/libimplant.so"
+
+# ---- build all native artifacts (injector + implant) ----
+build-native: build-injector build-implant
+	@echo "build-native: all native artifacts built"
+
+# ---- build the Rust daemon (cargo-ndk, aarch64) ----
+# Requires cargo-ndk: cargo install cargo-ndk
+build-daemon:
+	@command -v cargo-ndk >/dev/null 2>&1 || { echo "build-daemon: cargo-ndk not found (cargo install cargo-ndk)" >&2; exit 1; }
+	@test -n "$(NDK_HOME)" || { echo "build-daemon: ANDROID_NDK_HOME not set" >&2; exit 1; }
+	@echo "build-daemon: building voboost-inject (Rust, aarch64-linux-android)"
+	cd daemon && cargo ndk -t arm64-v8a build --release
+	@echo "build-daemon: done -> daemon/target/aarch64-linux-android/release/voboost-inject"
+
+# ---- build everything (daemon + native) ----
+build-new: build-native build-daemon
+	@echo "build-new: all new-stack artifacts built"
