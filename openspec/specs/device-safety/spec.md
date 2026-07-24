@@ -2,9 +2,7 @@
 Specify device-safety guarantees: guaranteed resume of gated processes, per-agent isolation,
 reinjection rate-limiting and quarantine, global panic-quarantine, coexistence detection,
 runtime kill-switch, and capability detection.
-
 ## Requirements
-
 ### Requirement: No vehicle motion or ignition gating
 The daemon SHALL NOT gate, delay, or withhold any injection decision on vehicle motion, speed, or
 ignition state. Agents are UI/WindowManager hooks; the correct device-safety mechanism is guaranteed
@@ -17,21 +15,26 @@ scope.
 - **THEN** the daemon makes no injection decision based on that vehicle state, and the device-safety
   guarantees (resume, isolation, quarantine) apply unchanged
 
-### Requirement: Guaranteed resume of gated processes
-The daemon SHALL always resume a spawn-gated process, even when its injection fails, errors, or
-exceeds a timeout. It SHALL never leave a process or the boot sequence suspended.
-
-#### Scenario: Injection fails on a gated process
-- **WHEN** injection into a spawn-gated process fails or times out
-- **THEN** the daemon resumes the process anyway so it runs unmodified
-
 ### Requirement: Per-agent isolation
-A failure in one agent SHALL NOT abort other agents and SHALL NOT crash the target process.
-Frida Script errors SHALL be caught and contained per agent.
 
-#### Scenario: One agent throws during load
-- **WHEN** one agent fails while loading into a target
-- **THEN** other agents for that target are unaffected and the target keeps running
+A failure in one agent SHALL NOT abort other agents and SHALL NOT crash the
+target process. Agent failures SHALL be contained per agent by the agent
+runtime's per-agent `try/catch` (owned by `voboost-script`, behind the seam) and
+by the implant's defensive invocation of the entry seam (see `agent-entry-seam`),
+so a throwing agent — or a throwing seam — leaves the target and the other agents
+running.
+
+#### Scenario: One agent throws during init
+
+- **WHEN** one agent fails while initializing in a target
+- **THEN** other agents for that target are unaffected and the target keeps
+  running
+
+#### Scenario: The entry seam itself throws
+
+- **WHEN** `AgentEntry.init` throws or cannot be resolved
+- **THEN** the implant contains the failure (clears the exception, reports it)
+  and the target keeps running (see `agent-entry-seam`)
 
 ### Requirement: Reinjection rate-limit and quarantine
 The daemon SHALL rate-limit reinjection to at most N attempts per M minutes per (agent, process)
@@ -54,35 +57,52 @@ stopping all injections to protect the device.
 - **THEN** the daemon stops all injections globally and reports the panic-quarantine in status
 
 ### Requirement: Coexistence skip
-Before injecting a process the daemon SHALL check `/proc/PID/maps` for an already-present Frida
-agent (e.g. another root tool) and SHALL skip injection for that process if one is found.
-Confirming the daemon's own injection SHALL NOT depend on `/proc/maps`. The check applies only to
-processes the daemon has not yet injected itself: the daemon tracks its own injections in memory,
-and its own agent footprint in a target SHALL NOT be treated as foreign coexistence on a
-re-injection (e.g. after a plan change).
 
-#### Scenario: Another Frida agent already present
-- **WHEN** `/proc/PID/maps` shows a Frida agent already loaded in a target
-- **THEN** the daemon skips injecting that process and records a coexistence skip in status
+Before injecting a process the daemon SHALL check `/proc/<pid>/maps` for an
+already-present **foreign** injection footprint (e.g. another root tool's agent)
+and SHALL skip injection for that process if one is found, recording a
+coexistence skip in status. The daemon's own footprint is the `libimplant.so`
+marker it tracks in memory (see `injection-control`); its own marker SHALL NOT be
+treated as foreign coexistence on a re-injection (e.g. after a plan change).
+Confirming the daemon's own injection SHALL use its tracked marker, not a
+foreign-agent heuristic.
+
+#### Scenario: Another tool's agent already present
+
+- **WHEN** `/proc/<pid>/maps` shows a foreign injection footprint in a target the
+  daemon has not injected
+- **THEN** the daemon skips injecting that process and records a coexistence skip
+  in status
 
 #### Scenario: Re-injection into a target the daemon already injected
-- **WHEN** a plan change re-injects into a process whose only Frida footprint is the daemon's own
-- **THEN** the daemon does not classify it as coexistence and proceeds idempotently
+
+- **WHEN** a plan change targets a process whose only injection footprint is the
+  daemon's own `libimplant.so` marker
+- **THEN** the daemon does not classify it as coexistence and proceeds
+  idempotently (reconcile, config update — not a second injection)
 
 ### Requirement: Runtime kill-switch
-The daemon SHALL stop all injections, resume all gated processes, and idle when the runtime
-kill-switch is active (the `/data/voboost/run/disable` file or a plan flag), regardless of the
-configured startup intent.
 
-#### Scenario: Kill-switch file appears at runtime
-- **WHEN** the `/data/voboost/run/disable` file appears while the daemon is running
-- **THEN** the daemon stops all injections, resumes any gated processes, and idles
+The daemon SHALL stop all new injections and idle when the runtime kill-switch is
+active — either the `/data/voboost-inject/run/disable` file or the `inject.json`
+`enabled:false` plan flag — regardless of the configured startup intent. Because
+injected code outlives the daemon, the kill-switch stops *new* injections; tearing
+down injections already live is done via a no-agents plan over channel B (see
+`update-planes`), not by the kill-switch. When the kill-switch is deactivated the
+daemon SHALL NOT auto-resume injecting; a daemon restart is required.
+
+#### Scenario: Kill-switch activates at runtime
+
+- **WHEN** the `/data/voboost-inject/run/disable` file appears, or a plan sets
+  `enabled:false`, while the daemon is running
+- **THEN** the daemon stops all new injections and idles
 
 #### Scenario: Kill-switch is deactivated
-- **WHEN** the kill-switch is removed (`run/disable` deleted or plan `disabled` set to false)
-  while the daemon is running
-- **THEN** the daemon does NOT resume injections automatically; a daemon restart is required to
-  re-open frida and resume normal operation
+
+- **WHEN** the kill-switch is removed (`run/disable` deleted or plan `enabled`
+  set back to true) while the daemon is running
+- **THEN** the daemon does NOT resume injecting automatically; a daemon restart
+  is required to resume normal operation
 
 ### Requirement: Capability detection over version strings
 The daemon and agents SHALL determine target-generation differences by detecting the actual
@@ -91,3 +111,27 @@ presence of a class/method/overload, using the OS version string only as a hint.
 #### Scenario: A9 vs A11 hook target differs
 - **WHEN** a hook target may differ between Android generations
 - **THEN** the decision is made by capability detection, not by parsing `ro.build.version.release`
+
+### Requirement: Per-target circuit breaker
+
+The daemon SHALL run a per-target circuit breaker: if a target process crashes M
+times within N seconds after the daemon injects it, the daemon SHALL stop
+injecting that target and report it `degraded`, leaving the target to run
+unmodified. The default SHALL start at M = 3 within N ≈ 30 seconds. For
+`system_server` the breaker SHALL be more conservative (M = 1–2), because its
+death is a framework soft-reboot rather than a single app restart. The breaker is
+per-target and complements, rather than replaces, the per-`(agent, process)`
+rate-limit and the global panic-quarantine.
+
+#### Scenario: A target keeps crashing after injection
+
+- **WHEN** a target crashes M times within N seconds after the daemon injects it
+- **THEN** the daemon stops injecting that target and reports it `degraded`, and
+  the target runs unmodified
+
+#### Scenario: system_server is treated conservatively
+
+- **WHEN** `system_server` crashes after injection
+- **THEN** the breaker trips at a lower threshold (M = 1–2) than for an ordinary
+  app target, because a `system_server` death is a framework soft-reboot
+
