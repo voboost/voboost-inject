@@ -7,6 +7,7 @@
 
 pub mod boot;
 pub mod config;
+pub mod control_plane;
 pub mod injector;
 pub mod log;
 pub mod manifest;
@@ -271,6 +272,10 @@ fn run_daemon(manifest: manifest::Manifest) {
             };
 
             // Inject.
+            // First, write the per-process config to channel B.
+            let config_json = plan.config_for(""); // process-level config
+            let _ = control_plane::write_config(process, config_json);
+
             let result = injector::inject(*pid, abi);
             match result {
                 injector::InjectResult::Ok => {
@@ -285,6 +290,10 @@ fn run_daemon(manifest: manifest::Manifest) {
                 }
             }
         }
+
+        // Aggregate per-process agent statuses from channel B into status.
+        let tracked = watcher.tracker().tracked_targets();
+        control_plane::aggregate_agent_statuses(&mut status, &tracked);
 
         status.write_atomic();
     }
