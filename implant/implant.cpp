@@ -42,6 +42,7 @@
 #include <pthread.h>
 
 #include "lsplant/lsplant.hpp"
+#include "agent_entry_seam.h"
 
 /* ---- Dobby logger silencer ----
  *
@@ -70,8 +71,8 @@ static lsplant_init_t p_lsplant_init = nullptr;
 static std::atomic<bool> g_initialized{false};
 static std::atomic<bool> g_libs_loaded{false};
 
-/* The fixed Java entry seam (see agent-entry-seam spec). */
-static const char *ENTRY_CLASS = "ru/voboost/agents/AgentEntry";
+/* The fixed Java entry seam (see agent-entry-seam spec + agent_entry_seam.h). */
+static const char *ENTRY_CLASS = AGENT_ENTRY_CLASS_NAME;
 
 /* ---- load native dependencies ---- */
 
