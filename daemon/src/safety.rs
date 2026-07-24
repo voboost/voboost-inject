@@ -27,7 +27,7 @@ fn key(agent: &str, process: &str) -> String {
 
 /// Per-(agent, process) attempt log with sliding-window rate-limit + backoff.
 struct AttemptLog {
-    times: Vec<u64>,       // ring buffer of attempt timestamps
+    times: Vec<u64>, // ring buffer of attempt timestamps
     backoff_step: u32,
     next_allowed: u64,
 }
@@ -79,9 +79,9 @@ impl Safety {
             config::SAFETY_MAX_ATTEMPTS,
             (config::SAFETY_WINDOW_MIN as u64) * 60,
             config::SAFETY_PANIC_THRESHOLD,
-            config::SAFETY_PANIC_WINDOW_SEC,
+            config::SAFETY_PANIC_WINDOW_SEC as u64,
             config::BREAKER_THRESHOLD,
-            config::BREAKER_WINDOW_SEC,
+            config::BREAKER_WINDOW_SEC as u64,
             config::BREAKER_THRESHOLD_SYSTEM_SERVER,
         )
     }
@@ -217,7 +217,10 @@ impl Safety {
             self.degraded_targets.insert(process.to_string(), true);
             log::err(
                 "safety",
-                &format!("circuit breaker tripped for {process} (crashes={})", crash_log.times.len()),
+                &format!(
+                    "circuit breaker tripped for {process} (crashes={})",
+                    crash_log.times.len()
+                ),
             );
         }
     }
@@ -237,7 +240,10 @@ impl Safety {
             self.panic = true;
             log::err(
                 "safety",
-                &format!("panic-quarantine tripped (deaths={})", self.death_times.len()),
+                &format!(
+                    "panic-quarantine tripped (deaths={})",
+                    self.death_times.len()
+                ),
             );
         }
     }

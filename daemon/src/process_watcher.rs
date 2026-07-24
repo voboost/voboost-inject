@@ -101,10 +101,20 @@ impl ProcessTracker {
     }
 }
 
+/// A poll pass result: targets that appeared (process, pid) and targets that
+/// died (pid, process).
+pub type PollResult = (Vec<(String, i32)>, Vec<(i32, String)>);
+
 /// Configuration for the /proc polling loop.
 pub struct ProcessWatcher {
     pub poll_interval: Duration,
     tracker: ProcessTracker,
+}
+
+impl Default for ProcessWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProcessWatcher {
@@ -119,16 +129,17 @@ impl ProcessWatcher {
         &mut self.tracker
     }
 
+    pub fn tracker(&self) -> &ProcessTracker {
+        &self.tracker
+    }
+
     /// One pass of the poll loop: find all target processes, report
     /// appearances (new pids for known targets) and deaths (tracked pids
     /// gone from /proc).
     ///
     /// Returns (appeared, died) where appeared = (process, pid) pairs to
     /// inject, and died = (pid, process) pairs that were tracked and died.
-    pub fn poll_pass(
-        &mut self,
-        target_processes: &[String],
-    ) -> (Vec<(String, i32)>, Vec<(i32, String)>) {
+    pub fn poll_pass(&mut self, target_processes: &[String]) -> PollResult {
         let mut appeared = Vec::new();
 
         for process in target_processes {

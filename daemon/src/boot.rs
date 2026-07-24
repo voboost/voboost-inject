@@ -46,9 +46,7 @@ impl BootState {
         }
 
         // Fork getprop (Android only). Returns "1\n" when boot is complete.
-        let output = Command::new("getprop")
-            .arg("sys.boot_completed")
-            .output();
+        let output = Command::new("getprop").arg("sys.boot_completed").output();
 
         match output {
             Ok(o) if o.status.success() => {

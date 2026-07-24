@@ -119,7 +119,11 @@ pub fn validate(manifest: &Manifest, json_bytes: &[u8]) -> Plan {
                 }
                 None => "{}".to_string(),
             };
-            plan.entries.push(PlanEntry { id, enabled, config });
+            plan.entries.push(PlanEntry {
+                id,
+                enabled,
+                config,
+            });
         }
     }
 
@@ -131,7 +135,7 @@ impl Plan {
     pub fn group_by_process<'a>(
         &'a self,
         manifest: &'a Manifest,
-    ) -> std::collections::HashMap<&str, Vec<&crate::manifest::AgentDef>> {
+    ) -> std::collections::HashMap<&'a str, Vec<&'a crate::manifest::AgentDef>> {
         let mut map = std::collections::HashMap::new();
         for entry in &self.entries {
             if !entry.enabled {
@@ -154,5 +158,27 @@ impl Plan {
             }
         }
         "{}"
+    }
+
+    /// Build the per-process channel-B config document.
+    ///
+    /// One implant is injected per process; it loads every enabled agent that
+    /// the manifest maps to that process. The document is
+    /// `{"agents":[{"id":..,"config":<opaque>}...]}`, matching the no-agents
+    /// teardown shape in control_plane. Each agent's config is embedded as raw
+    /// JSON (the daemon never interprets it).
+    pub fn config_for_process(&self, process: &str, manifest: &Manifest) -> String {
+        let agents: Vec<Value> = self
+            .entries
+            .iter()
+            .filter(|e| e.enabled)
+            .filter(|e| manifest.find(&e.id).is_some_and(|d| d.process == process))
+            .map(|e| {
+                let config: Value =
+                    serde_json::from_str(&e.config).unwrap_or_else(|_| serde_json::json!({}));
+                serde_json::json!({ "id": e.id, "config": config })
+            })
+            .collect();
+        serde_json::json!({ "agents": agents }).to_string()
     }
 }

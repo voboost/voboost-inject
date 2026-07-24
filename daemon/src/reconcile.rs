@@ -69,6 +69,9 @@ pub fn detect_bitness(pid: i32) -> Option<&'static str> {
         return Some("armeabi-v7a"); // no /lib64/ → likely 32-bit
     }
 
-    log::err("reconcile", &format!("bitness detection failed for pid={pid}"));
+    log::err(
+        "reconcile",
+        &format!("bitness detection failed for pid={pid}"),
+    );
     None
 }

@@ -72,7 +72,10 @@ pub fn write_config(process: &str, config_json: &str) -> Result<(), String> {
         format!("rename: {e}")
     })?;
 
-    log::debug("control_plane", &format!("wrote config for {process} ({})", config_json.len()));
+    log::debug(
+        "control_plane",
+        &format!("wrote config for {process} ({})", config_json.len()),
+    );
     Ok(())
 }
 
@@ -95,7 +98,10 @@ pub fn is_process_alive(pid: i32) -> bool {
 /// (unhook + release). The daemon does NOT unload code out-of-band.
 pub fn write_no_agents_plan(process: &str) -> Result<(), String> {
     write_config(process, r#"{"agents":[]}"#)?;
-    log::info("control_plane", &format!("wrote no-agents plan for {process} (teardown signal)"));
+    log::info(
+        "control_plane",
+        &format!("wrote no-agents plan for {process} (teardown signal)"),
+    );
     Ok(())
 }
 
@@ -104,10 +110,7 @@ pub fn write_no_agents_plan(process: &str) -> Result<(), String> {
 /// Reads each <process>-agent-status.json from the shared dir, checks liveness
 /// via /proc, and merges into the Status object. A process whose /proc/<pid>
 /// is gone is NOT reported as active (liveness from /proc, not the status file).
-pub fn aggregate_agent_statuses(
-    status: &mut crate::status::Status,
-    tracked: &[(i32, String)],
-) {
+pub fn aggregate_agent_statuses(status: &mut crate::status::Status, tracked: &[(i32, String)]) {
     for (pid, process) in tracked {
         // Liveness check: /proc/<pid> must exist.
         if !is_process_alive(*pid) {
@@ -137,7 +140,13 @@ pub fn aggregate_agent_statuses(
 /// Sanitize a process name for use in a filename (replace non-alphanumeric).
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -147,7 +156,10 @@ mod tests {
 
     #[test]
     fn sanitize_package_id() {
-        assert_eq!(sanitize_name("com.qinggan.app.launcher"), "com-qinggan-app-launcher");
+        assert_eq!(
+            sanitize_name("com.qinggan.app.launcher"),
+            "com-qinggan-app-launcher"
+        );
         assert_eq!(sanitize_name("system_server"), "system_server");
     }
 }

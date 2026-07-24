@@ -22,7 +22,10 @@ pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
     log::init();
-    log::info("main", &format!("voboost-inject {DAEMON_VERSION} starting (new stack)"));
+    log::info(
+        "main",
+        &format!("voboost-inject {DAEMON_VERSION} starting (new stack)"),
+    );
 
     // --- Single-instance via pidfile + flock ---
     if !acquire_single_instance() {
@@ -56,7 +59,6 @@ fn main() {
 /// Acquire single-instance lock via pidfile + flock.
 fn acquire_single_instance() -> bool {
     use std::fs::{self, OpenOptions};
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
     let run_dir = config::RUN_DIR;
@@ -68,6 +70,7 @@ fn acquire_single_instance() -> bool {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&pidfile)
     {
         Ok(f) => f,
@@ -108,10 +111,7 @@ fn startup_permitted() -> bool {
     let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&content) else {
         return true; // malformed → permitted
     };
-    let startup = v
-        .get("startup")
-        .and_then(|s| s.as_str())
-        .unwrap_or("");
+    let startup = v.get("startup").and_then(|s| s.as_str()).unwrap_or("");
     !startup.eq_ignore_ascii_case("none")
 }
 
@@ -164,13 +164,14 @@ fn run_daemon(manifest: manifest::Manifest) {
     // Install SIGTERM handler — sets the shutdown flag, does NOT kill hooks.
     install_sigterm_handler();
 
-    log::ok("main", "daemon loop started (ptrace injection, /proc polling)");
-
-    // Initial injection pass (reconcile first).
-    inject_all_targets(&manifest, &mut safety, &mut watcher, &mut status);
+    log::ok(
+        "main",
+        "daemon loop started (ptrace injection, /proc polling)",
+    );
     status.write_atomic();
 
-    // Poll loop.
+    // Poll loop. The first iteration discovers and injects every already-running
+    // target (the tracker starts empty, so poll_pass reports them as appeared).
     let poll_interval = std::time::Duration::from_secs(2);
     loop {
         // Check shutdown flag (set by SIGTERM handler).
@@ -239,7 +240,10 @@ fn run_daemon(manifest: manifest::Manifest) {
 
             // Reconcile: already injected?
             if reconcile::is_injected(*pid) {
-                log::debug("main", &format!("reconcile: {process} pid={pid} already injected"));
+                log::debug(
+                    "main",
+                    &format!("reconcile: {process} pid={pid} already injected"),
+                );
                 continue;
             }
 
@@ -258,7 +262,10 @@ fn run_daemon(manifest: manifest::Manifest) {
                     .iter()
                     .any(|a| a.process == *process && a.requires_boot);
                 if has_boot_agents {
-                    log::debug("main", &format!("boot-deferred: {process} pid={pid} waiting"));
+                    log::debug(
+                        "main",
+                        &format!("boot-deferred: {process} pid={pid} waiting"),
+                    );
                     status.set_injection("", process, status::InjectionState::Waiting);
                     continue;
                 }
@@ -266,15 +273,19 @@ fn run_daemon(manifest: manifest::Manifest) {
 
             // Detect bitness → select ABI.
             let Some(abi) = reconcile::detect_bitness(*pid) else {
-                log::err("main", &format!("bitness detection failed: {process} pid={pid}"));
+                log::err(
+                    "main",
+                    &format!("bitness detection failed: {process} pid={pid}"),
+                );
                 status.set_injection("", process, status::InjectionState::Failed);
                 continue;
             };
 
             // Inject.
-            // First, write the per-process config to channel B.
-            let config_json = plan.config_for(""); // process-level config
-            let _ = control_plane::write_config(process, config_json);
+            // First, write the per-process config to channel B (all enabled
+            // agents mapped to this process).
+            let config_json = plan.config_for_process(process, &manifest);
+            let _ = control_plane::write_config(process, &config_json);
 
             let result = injector::inject(*pid, abi);
             match result {
@@ -300,8 +311,7 @@ fn run_daemon(manifest: manifest::Manifest) {
 }
 
 /// Global shutdown flag, set by the SIGTERM handler.
-static SHUTTING_DOWN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Install a SIGTERM handler that sets the shutdown flag.
 /// The poll loop checks it each iteration and exits cleanly.
@@ -312,7 +322,8 @@ extern "C" fn handle_sigterm(_sig: i32) {
 
 fn install_sigterm_handler() {
     unsafe {
-        libc::signal(libc::SIGTERM, handle_sigterm as libc::sighandler_t);
+        let handler: extern "C" fn(i32) = handle_sigterm;
+        libc::signal(libc::SIGTERM, handler as usize as libc::sighandler_t);
     }
 }
 

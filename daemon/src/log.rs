@@ -6,7 +6,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -122,7 +122,7 @@ fn decompose_unix(unix: u64) -> (u32, u32, u32, u32, u32, u32) {
     (year, m, d, hour, min, sec)
 }
 
-fn today_path(dir: &PathBuf, now: SystemTime) -> PathBuf {
+fn today_path(dir: &Path, now: SystemTime) -> PathBuf {
     let (secs, _) = elapsed(now);
     let (year, month, day, _, _, _) = decompose_unix(secs);
     dir.join(format!("inject-{year:04}-{month:02}-{day:02}.log"))

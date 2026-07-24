@@ -35,8 +35,3 @@ libc = "0.2"
 [build-dependencies]
 # build.rs: embed EMBEDDED_PUBKEY, generate version
 anyhow = "1"
-
-[profile.release]
-opt-level = 3
-lto = false
-strip = true

@@ -11,11 +11,22 @@ use std::path::PathBuf;
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
+    // --- Locate the config dir ---
+    // The daemon crate lives at <repo>/daemon, but the PEM keys live at
+    // <repo>/config. `cargo ndk build` runs with CWD = daemon/, so resolve
+    // relative to CARGO_MANIFEST_DIR and fall back to its parent (the repo
+    // root) where the config/ dir actually is.
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let config_dir = [manifest_dir.join("config"), manifest_dir.join("../config")]
+        .into_iter()
+        .find(|d| d.join("release-public.pem").exists() || d.join("key-dev-public.pem").exists())
+        .expect("build.rs: no config/ dir with a public key PEM found");
+
     // --- Embed the public key ---
     // Try release key first (CI), then dev key (local).
-    let key_pem = fs::read("config/release-public.pem")
-        .or_else(|_| fs::read("config/key-dev-public.pem"))
-        .expect("build.rs: no public key PEM found (config/key-dev-public.pem or config/release-public.pem)");
+    let key_pem = fs::read(config_dir.join("release-public.pem"))
+        .or_else(|_| fs::read(config_dir.join("key-dev-public.pem")))
+        .expect("build.rs: no public key PEM (release-public.pem / key-dev-public.pem)");
 
     let key_bytes = extract_ed25519_pubkey_from_pem(&key_pem)
         .expect("build.rs: failed to extract ed25519 pubkey from PEM");
@@ -40,8 +51,14 @@ fn main() {
     fs::write(out_dir.join("version.rs"), version_src)
         .expect("build.rs: failed to write version.rs");
 
-    println!("cargo:rerun-if-changed=config/key-dev-public.pem");
-    println!("cargo:rerun-if-changed=config/release-public.pem");
+    println!(
+        "cargo:rerun-if-changed={}",
+        config_dir.join("key-dev-public.pem").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        config_dir.join("release-public.pem").display()
+    );
 }
 
 /// Extract the raw 32-byte ed25519 public key from a PEM file.
@@ -77,8 +94,7 @@ fn extract_ed25519_pubkey_from_pem(pem: &[u8]) -> Result<[u8; 32], String> {
 
 /// Minimal base64 decoder (avoids adding a base64 build-dependency).
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let filtered: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let mut out = Vec::with_capacity(filtered.len() * 3 / 4);

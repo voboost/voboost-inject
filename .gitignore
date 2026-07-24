@@ -1,6 +1,7 @@
 .claude/
 plans
 build/
+target/
 .tools/
 dist/
 config/*-private.pem
