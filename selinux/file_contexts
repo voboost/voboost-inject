@@ -1,0 +1,20 @@
+# file_contexts — SELinux file type labels for voboost-inject.
+#
+# Applied by `restorecon` at provisioning (and after system OTA re-arm).
+# The daemon binary gets voboost-inject_exec so init transitions into the
+# voboost-inject domain. The root zone gets voboost-inject_data_file.
+# The channel-B shared dir gets media_rw_data_file (symmetric rw from
+# untrusted_app_all without extra allow rules).
+
+# Daemon binary (exec type → domain transition via init_daemon_domain)
+/data/voboost-inject/voboost-inject    u:object_r:voboost-inject_exec:s0
+
+# Root zone and subdirectories (data type → daemon rw)
+/data/voboost-inject(/.*)?             u:object_r:voboost-inject_data_file:s0
+
+# Channel-B shared directory (media_rw_data_file → symmetric app/process rw)
+# This overrides the broader data_file rule above with a more specific type.
+/data/voboost-inject/shared(/.*)?      u:object_r:media_rw_data_file:s0
+
+# Payload directory (native .so files the daemon verifies and injects)
+/data/voboost-inject/payload(/.*)?     u:object_r:voboost-inject_data_file:s0
