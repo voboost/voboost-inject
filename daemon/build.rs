@@ -59,6 +59,33 @@ fn main() {
         "cargo:rerun-if-changed={}",
         config_dir.join("release-public.pem").display()
     );
+
+    // --- Link the C injector (libinjector.a) via FFI ---
+    // The daemon's only extern "C" seam is vbi_inject (injector/injector.h),
+    // built by `make build-injector` into injector/obj/local/<abi>/libinjector.a.
+    // cargo-ndk builds for aarch64-linux-android; map the Rust target arch to
+    // the ndk-build ABI dir. Host builds (cargo check/test) do not link the
+    // extern block (FFI symbols are only resolved at final link), so a missing
+    // archive on the host is fine — only emit link directives when the archive
+    // exists.
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let abi = match target_arch.as_str() {
+        "aarch64" => "arm64-v8a",
+        "arm" => "armeabi-v7a",
+        other => other,
+    };
+    let injector_archives = [
+        manifest_dir.join("../injector/obj/local").join(abi).join("libinjector.a"),
+        manifest_dir.join("../injector/libs").join(abi).join("libinjector.a"),
+    ];
+    if let Some(archive) = injector_archives.iter().find(|p| p.exists()) {
+        println!(
+            "cargo:rustc-link-search={}",
+            archive.parent().unwrap().display()
+        );
+        println!("cargo:rustc-link-lib=static=injector");
+        println!("cargo:rerun-if-changed={}", archive.display());
+    }
 }
 
 /// Extract the raw 32-byte ed25519 public key from a PEM file.

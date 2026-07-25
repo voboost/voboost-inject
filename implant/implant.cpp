@@ -41,7 +41,7 @@
 #include <cstring>
 #include <pthread.h>
 
-#include "lsplant/lsplant.hpp"
+#include "lsplant.hpp"
 #include "agent_entry_seam.h"
 
 /* ---- Dobby logger silencer ----

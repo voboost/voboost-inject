@@ -312,7 +312,7 @@ ADB ?= adb
 EMU_SERIAL ?= emulator-5554
 EMU_ZONE ?= /data/voboost-inject
 EMU_APP_ZONE ?= /data/user/0/ru.voboost
-EMU_BIN ?= daemon/target/aarch64-linux-android/release/voboost-inject
+EMU_BIN ?= target/aarch64-linux-android/release/voboost-inject
 
 # voboost app + stubs APKs (sibling repos). Used by emulator-run to install
 # the app (which creates /data/data/ru.voboost with the correct UID) and the
@@ -422,18 +422,25 @@ PREBUILT_DIR ?= $(PWD)/prebuilt
 
 # ---- build the C injector (libinjector.a) ----
 # A static archive linked into the Rust daemon via build.rs FFI.
+# APP_PLATFORM/APP_ABI/APP_STL are passed on the command line: NDK r29 does not
+# reliably pick up Application.mk via APP_APPLICATION_MK (it defaults to
+# android-21, which hides process_vm_readv/writev — API 23+), so the command
+# line is authoritative. Application.mk stays for IDEs/docs.
 build-injector:
 	@test -n "$(NDK_HOME)" || { echo "build-injector: ANDROID_NDK_HOME not set" >&2; exit 1; }
 	@echo "build-injector: building libinjector.a (C, arm64-v8a)"
-	cd injector && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_APPLICATION_MK=Application.mk
-	@echo "build-injector: done -> injector/libs/arm64-v8a/libinjector.a"
+	cd injector && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
+		APP_PLATFORM=android-28 APP_ABI=arm64-v8a APP_STL=none
+	@echo "build-injector: done -> injector/obj/local/arm64-v8a/libinjector.a"
 
 # ---- build the C++ implant (libimplant.so, per-ABI) ----
 # The in-process loader. Both ABIs produced (the daemon selects at runtime).
+# APP_PLATFORM/APP_ABI/APP_STL on the command line (see build-injector note).
 build-implant:
 	@test -n "$(NDK_HOME)" || { echo "build-implant: ANDROID_NDK_HOME not set" >&2; exit 1; }
 	@echo "build-implant: building libimplant.so (C++, arm64-v8a + armeabi-v7a)"
-	cd implant && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk APP_APPLICATION_MK=Application.mk
+	cd implant && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
+		APP_PLATFORM=android-28 APP_ABI="arm64-v8a armeabi-v7a" APP_STL=c++_static
 	@echo "build-implant: done -> implant/libs/{arm64-v8a,armeabi-v7a}/libimplant.so"
 
 # ---- build all native artifacts (injector + implant) ----
@@ -441,13 +448,15 @@ build-native: build-injector build-implant
 	@echo "build-native: all native artifacts built"
 
 # ---- build the Rust daemon (cargo-ndk, aarch64) ----
-# Requires cargo-ndk: cargo install cargo-ndk
+# Requires cargo-ndk (cargo install cargo-ndk). -P 28 = API level 28
+# (process_vm_readv/writev need API 23+; the daemon targets Android 9/API 28).
+# Output lands in the workspace target/ (Cargo workspace), not daemon/target/.
 build-daemon:
 	@command -v cargo-ndk >/dev/null 2>&1 || { echo "build-daemon: cargo-ndk not found (cargo install cargo-ndk)" >&2; exit 1; }
 	@test -n "$(NDK_HOME)" || { echo "build-daemon: ANDROID_NDK_HOME not set" >&2; exit 1; }
 	@echo "build-daemon: building voboost-inject (Rust, aarch64-linux-android)"
-	cd daemon && cargo ndk -t arm64-v8a build --release
-	@echo "build-daemon: done -> daemon/target/aarch64-linux-android/release/voboost-inject"
+	cd daemon && cargo ndk -t arm64-v8a -P 28 build --release
+	@echo "build-daemon: done -> target/aarch64-linux-android/release/voboost-inject"
 
 # ---- build everything (daemon + native) ----
 build-new: build-native build-daemon

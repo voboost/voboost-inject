@@ -5,7 +5,11 @@ target/
 .tools/
 dist/
 config/*-private.pem
-src/embedded_pubkey.vala
+# ndk-build output (injector + implant)
+injector/obj/
+injector/libs/
+implant/obj/
+implant/libs/
 test/fixtures/manifest.json
 test/fixtures/manifest.sig
 test/fixtures/manifest-bad.sig

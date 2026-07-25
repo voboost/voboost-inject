@@ -9,7 +9,7 @@
  * trampoline. Pure function-pointer plumbing.
  */
 
-#include "dobby/dobby.h"
+#include "dobby.h"
 
 /*
  * Install an inline hook: target → hooker.
