@@ -2,119 +2,42 @@
 Specify build configuration, static linking, public-key embedding, frida-core subproject wiring,
 and signing key management.
 ## Requirements
-### Requirement: Release-only meson build
-The project SHALL build with meson in release configuration only (`buildtype=release`), with
-frida-core statically linked into the daemon binary (so there is no separate frida shared library
-on disk — design D10a), LTO (`b_lto=true`), and strip (`install_strip`). These SHALL be set in the
-project `default_options` and the executable target's frida-core dependency wiring so no manual
-flag is required. There SHALL be no debug build configuration. The full `-static` (static-libc)
-link SHALL be applied only to the Android device (cross) build, so `make build-android` yields a
-self-contained device binary, while the host build (`make build`) stays linkable for tests. The
-Android device build links every bundled subproject (frida-core, glib, gio, json-glib, monocypher,
-…) statically via the global `default_library=static` (set in the root `default_options`), and links
-the bionic system libs (libc, liblog, libz, libm, libdl) dynamically — NDK r29 ships no static
-bionic, and bionic is always present on Android. The daemon's `frida-core:connectivity` feature
-(TLS/ICE) SHALL be disabled in the Android build (the daemon is local-backend-only: no socket, no
-TLS, no ICE — see `frida_controller.vala`); this avoids pulling in the unused `gioopenssl`/
-`glib-networking`/`nice`/`usrsctp` stack. frida's meson fork does not auto-derive `--pkg` flags
-from `dependencies:` the way upstream meson does, so the executable's `vala_args` SHALL name
-`--pkg=gio-2.0` and `--pkg=json-glib-1.0` explicitly (frida-core does the same in its own
-`meson.build`). Tests are host-only: the root `meson.build` SHALL skip `subdir('test')` in a cross
-build.
-
-#### Scenario: Host build for tests
-- **WHEN** `make build` runs on the host (no cross-file)
-- **THEN** it produces a release, LTO'd binary with frida-core statically
-  linked, links dynamically against host libs, and offers no debug build
-  target. Strip is an install-time step (`meson install --strip`), not a
-  `make build` step: `make build` leaves the symbol table in place (host
-  tests need it); only the installed release artifact is stripped. `make setup`
-  configures via frida-meson (not the system meson) so frida-core's
-  `compat/build.py` (run during ninja) can load the `coredata.dat` it wrote.
-
-#### Scenario: Device build is self-contained
-- **WHEN** `make build-android` runs with the Android cross-file
-- **THEN** it produces an arm64-v8a binary with the frida/glib stack statically
-  linked (no glib/gio/json-glib on the device) and bionic dynamically linked,
-  with `frida-core:connectivity=disabled`, and nothing to provision on the
-  device (ed25519 verify is the Monocypher subproject — design D9d)
-
-#### Scenario: Device build disables unused connectivity
-- **WHEN** `make build-android` configures the cross build
-- **THEN** it passes `-Dfrida-core:connectivity=disabled` (the daemon is
-  local-backend-only; TLS/ICE is unused), and `default_library=static` is set
-  globally so every transitive subproject builds a static archive
-
-#### Scenario: Vala packages are named explicitly
-- **WHEN** the daemon's Vala sources are compiled
-- **THEN** `vala_args` includes `--pkg=gio-2.0` and `--pkg=json-glib-1.0`
-  (frida's meson fork does not auto-derive `--pkg` from `dependencies:`)
-
-#### Scenario: Tests are skipped in a cross build
-- **WHEN** `make build-android` configures the cross build
-- **THEN** `subdir('test')` is guarded by `not meson.is_cross_build()` (tests
-  are host-only; no test runner on the device)
-
 ### Requirement: Project version baseline in meson.build
-This change SHALL set the `project()` `version` in `meson.build` to the semver baseline
-`1.0.0-beta1` as the single source of truth; on a successful build `make build` SHALL produce the
-binary `voboost-inject`.
+
+The project SHALL carry a semantic version in `Cargo.toml`
+`[package].version` as the single source of truth, with the baseline value
+`1.0.0-beta1`. CI SHALL consume this value and SHALL NOT define the version
+elsewhere. On a successful build `make build` SHALL produce the binary
+`voboost-inject`.
 
 #### Scenario: Version baseline is set
-- **WHEN** `meson.build` is examined after this change
-- **THEN** its `project()` version is `1.0.0-beta1`
+
+- **WHEN** `Cargo.toml` is examined after this change
+- **THEN** its `[package].version` is `1.0.0-beta1`
 
 #### Scenario: make build produces the binary
+
 - **WHEN** `make build` runs after `make init` on a provisioned clone
 - **THEN** it produces the `voboost-inject` binary
 
 ### Requirement: Public key embedded via build-time generation
-The public key SHALL be compiled into the binary by a meson `custom_target` that reads
-`config/key-dev-public.pem` (locally) or the committed release public key (in CI) and emits a generated
-Vala source carrying the raw ed25519 key bytes. The binary SHALL NOT read the public key from disk
-at runtime.
+
+The public key SHALL be compiled into the binary by a Rust `build.rs` that
+reads `config/key-dev-public.pem` (locally) or the committed release public key
+(in CI) and emits a generated Rust source carrying the raw ed25519 key bytes.
+The binary SHALL NOT read the public key from disk at runtime.
 
 #### Scenario: Build bakes the key
+
 - **WHEN** the daemon is built
-- **THEN** a `custom_target` generates the embedded-key source from the PEM, and the binary carries
-  the raw key bytes with no runtime file dependency on the key
+- **THEN** a `build.rs` generates the embedded-key source from the PEM, and the
+  binary carries the raw key bytes with no runtime file dependency on the key
 
 #### Scenario: Changing the key requires a rebuild
+
 - **WHEN** the baked public key must change
-- **THEN** it is changed by rebuilding with a different PEM, not by editing a runtime config or file
-
-### Requirement: frida-core QuickJS subproject from the provisioned wrap
-The build SHALL produce frida-core as a meson subproject built from the pinned git wrap provisioned
-by the `init` change (no hardcoded local path) and statically linked into the daemon, with the
-subproject options pinned explicitly rather than left to frida defaults:
-`frida-gum:v8=disabled` (gum's `v8` option defaults to `auto` with a v8 wrap available, so
-QuickJS-only must be pinned, not assumed; QuickJS stays enabled by gum's default),
-`frida-core:default_library=static`, `frida-core:frida_version` supplied (the wrap checkout has no
-`releng` submodule to compute it), only the local backend enabled, frida-core's bundled
-tools/tests disabled, and `frida-core:compat=auto` so frida's 32-bit helper
-(`frida-helper-32`) and the armv7 `frida-agent.so` are linked into the daemon ELF — the target
-device runs a mix of 64-bit and 32-bit (armv7) processes, and the daemon must be able to inject
-into the 32-bit ones (see `32bit-target-support`). Configuring the subproject SHALL use the
-frida-patched Vala compiler (`valac` version suffix `-frida`, provisioned by `make init` — see
-provisioning) and meson >= 1.1.0 (frida-core's floor); the root `meson.build` SHALL declare that
-`meson_version` floor. Dependency wiring SHALL be an explicit `subproject('frida-core')` plus
-`dependency('frida-core-1.0', static: true)` resolved via frida-core's `meson.override_dependency`.
-
-#### Scenario: frida-core is built
-- **WHEN** the daemon is built
-- **THEN** frida-core is compiled from the provisioned `subprojects/` wrap with the QuickJS engine
-  and V8 disabled, and linked statically
-
-#### Scenario: 32-bit helper is built into the device binary
-- **WHEN** `make build-android` runs the Android cross build
-- **THEN** the daemon ELF embeds frida's 32-bit helper (`frida-helper-32` and the armv7
-  `frida-agent.so`) because `frida-core:compat=auto`, and the daemon can inject into 32-bit
-  (armv7) target processes on a mixed-ABI device
-
-#### Scenario: Toolchain is the patched valac
-- **WHEN** `meson setup` configures the build after `make init`
-- **THEN** the Vala compiler in use reports a `-frida` version suffix and the frida-core
-  subproject configures successfully
+- **THEN** it is changed by rebuilding with a different PEM, not by editing a
+  runtime config or file
 
 ### Requirement: Private signing key never in the repository
 The private signing key SHALL exist only in CI secrets (e.g. CI secret store / KMS) and SHALL NOT
@@ -144,109 +67,119 @@ SHALL always be enabled, including in dev builds — there SHALL be no mode that
 - **WHEN** any build (dev or release) runs
 - **THEN** signature and hash verification are enforced and cannot be disabled
 
-### Requirement: Android cross-build uses frida's meson and a complete cross-file
-`make build-android` SHALL configure the arm64-v8a device build with frida's own
-meson (the `frida/meson` commit pinned by the fetched `frida-core`'s `releng/meson`
-submodule), not the system meson, because frida-gum's `quickcompile` (`native:
-true`) requires its QuickJS subproject to be built for the build machine — only
-frida's meson re-invokes a `[provide]` subproject for the build machine. The
-cross-file `config/android-cross.ini` SHALL set `subsystem = 'android'` in
-`[host_machine]` (frida-core derives `host_os` from `host_machine.subsystem()` and
-gates Android on it) and SHALL name a `readelf` binary in `[binaries]` (frida-core
-does `find_program('readelf')` for the non-darwin `host_os_family`; the NDK's
-`llvm-readelf` is already on PATH for the cross-compiler). The NDK SHALL be r29 —
-frida-core 17.11.0's releng requires exactly major version 29
-(`releng/env_android.py NDK_REQUIRED=29`, checked when building the embedded
-agent); r27/r27d are rejected with `NdkVersionError`. `make build-android` SHALL
-derive the NDK toolchain PATH automatically from `ANDROID_NDK_HOME` (the glob
-`$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/*/bin`), so the cross-compiler and
-LLVM tools resolve without the developer manually configuring PATH. It SHALL fail
-early with a clear message if `ANDROID_NDK_HOME` is not set or the toolchain bin
-is not found.
+### Requirement: Cargo + ndk-build/CMake mixed build
 
-#### Scenario: Cross-file declares the Android subsystem
-- **WHEN** `config/android-cross.ini` is examined
-- **THEN** its `[host_machine]` sets `subsystem = 'android'`, and its `[binaries]`
-  names a `readelf` (e.g. `llvm-readelf`)
+The project SHALL build via a top-level `Makefile` orchestrating two native
+toolchains: the daemon crate (`daemon/`, Rust) via `cargo-ndk` targeting
+`aarch64-linux-android` (API 28), and the native artifacts via NDK r29
+`ndk-build`/CMake — `injector/` (C) producing `libinjector.a`, `implant/`
+(C++) producing `libimplant.so` per ABI, and Dobby (C++) producing
+`libdobby.a` per ABI. The daemon crate SHALL link `libinjector.a` (C, static)
+via its `build.rs` FFI; it SHALL NOT link `libimplant.so` or any hooker symbol
+(the daemon hands payload files by path — see `native-payload`). The Makefile
+SHALL provide `build` (host, for tests), `build-daemon`, `build-native`,
+`build-android` (all), `sign-elf`, `release-manifest`, `test`, `check`, and
+`lint` targets. The `build-android` target SHALL derive the NDK toolchain PATH
+from `ANDROID_NDK_HOME` (`$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/*/bin`)
+and SHALL fail early with a clear message if `ANDROID_NDK_HOME` is not set or
+the toolchain bin is not found. Tests SHALL be host-only (no test runner on the
+device); the cross build SHALL skip test compilation.
 
-#### Scenario: NDK version satisfies frida-core
-- **WHEN** `make build-android` runs
-- **THEN** `ANDROID_NDK_HOME` points at an NDK whose major version is 29 (the
-  release workflow pins `ndk-version: r29`; r27/r27d fail the releng check)
+#### Scenario: Device build produces all artifacts
 
-#### Scenario: NDK toolchain PATH is derived automatically
-- **WHEN** `make build-android` runs with `ANDROID_NDK_HOME` set to a valid NDK root
-- **THEN** it derives the toolchain bin directory from
-  `$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/*/bin`, adds it to PATH for the
-  build, and the cross-compiler and LLVM tools resolve without requiring the
-  developer to configure PATH manually
+- **WHEN** `make build-android` runs with `ANDROID_NDK_HOME` set to a valid
+  NDK r29 root
+- **THEN** it produces the daemon ELF (cargo-ndk, aarch64), the per-ABI
+  `libimplant.so`, and the per-ABI `libdobby.a`, `liblsplant.so`,
+  `liblsplt.so`
+
+#### Scenario: Daemon links only the injector
+
+- **WHEN** the daemon crate is built
+- **THEN** its `build.rs` links `libinjector.a` (C, static) and declares the
+  single `extern "C" fn vbi_inject(...)` seam; it does NOT link `libimplant.so`
+  or any LSPlant/Dobby symbol
 
 #### Scenario: Missing ANDROID_NDK_HOME fails early
+
 - **WHEN** `make build-android` runs without `ANDROID_NDK_HOME`
 - **THEN** it fails immediately with the message
-  `build-android: ANDROID_NDK_HOME not set` (exit 1), before invoking meson
+  `build-android: ANDROID_NDK_HOME not set` (exit 1), before invoking any build
 
-#### Scenario: Invalid NDK path fails early
-- **WHEN** `make build-android` runs with `ANDROID_NDK_HOME` set to a path that
-  has no `toolchains/llvm/prebuilt/*/bin`
-- **THEN** it fails with `build-android: NDK toolchain not found` (exit 1), before
-  invoking meson
+#### Scenario: Tests are host-only
 
-### Requirement: Android frida-agent .so keeps a Bionic-loadable hash table
+- **WHEN** `make build-android` configures the cross build
+- **THEN** test compilation is skipped (no test runner on the device)
 
-The Android cross-build of the frida agent SHALL link the raw agent with
-`-Wl,--hash-style=sysv` so the final `frida-agent-64.so` (after frida-core's
-`post_process` runs `termux-elf-cleaner`) retains a `DT_HASH` section the Bionic
-linker can resolve symbols from at `dlopen`. The NDK default (`--hash-style=gnu`)
-emits only `.gnu.hash`, which termux-elf-cleaner strips, leaving a hashless .so
-that Bionic rejects with `empty/missing DT_HASH/DT_GNU_HASH`. The patch SHALL be
-persisted via `subprojects/frida-core.wrap` `diff_files` so clean clones apply it.
+### Requirement: Native payload toolchain constraints
 
-#### Scenario: Final agent carries DT_HASH
-- **WHEN** `make build-android` produces the embedded `frida-agent-64.so`
-- **THEN** `llvm-readelf -d` on it lists `DT_HASH` (the cleaner stripped any
-  `.gnu.hash` but left the SysV `.hash`)
+The native artifacts (`libimplant.so`, LSPlant, Dobby) SHALL be built with NDK
+r29 (Clang 21); NDK r27/r27d SHALL be rejected because LSPlant's C++23 modules
+fail under r27. The C++ runtime SHALL be `c++_static` (the system
+`libc++_shared.so` on Android 9 conflicts by ABI). The hooker SHALL be built
+with `LOG_DISABLED` defined at directory scope via
+`add_compile_definitions(LOG_DISABLED)` (not `target_compile_definitions`,
+which does not reach BMI C++23 modules), and any unguarded
+`__android_log_print` (e.g. in `jni_helper.hpp`) SHALL be wrapped in
+`#ifndef LOG_DISABLED`. LSPlant SHALL be built from source using the committed
+`lsplant.hpp` header (the Maven-published `InitInfo` ABI diverged — it is
+missing `Allocator`/`Recycler` fields). Link-time optimization (`-flto`) SHALL
+be disabled for the native artifacts.
 
-#### Scenario: Target injection loads the agent
-- **WHEN** the daemon injects an agent into a spawned/attached target on an
-  Android emulator (API 28)
-- **THEN** `dlopen` of the agent succeeds (no `empty/missing DT_HASH/DT_GNU_HASH`),
-  the agent loads, and `inject-status.json` reports `state: active`
+#### Scenario: NDK r29 is required
 
-#### Scenario: Patch applies after the libc-shim patch
-- **WHEN** a clean clone fetches frida-core and applies the wrap `diff_files`
-- **THEN** the `--hash-style=sysv` patch applies after the libc-shim patch
-  (both touch the Android `if host_os == 'android'` block in
-  `lib/agent/meson.build`) and the build configures without conflict
+- **WHEN** the native artifacts are built
+- **THEN** the build uses NDK r29 (Clang 21); NDK r27 is rejected because
+  LSPlant's C++23 modules do not build under it
 
-### Requirement: All meson build-dir commands in the Makefile use frida's meson
+#### Scenario: c++_static runtime
 
-Every `make` target that runs a meson command over the build dir SHALL invoke frida's own meson.
+- **WHEN** the implant and hooker are linked
+- **THEN** they use `c++_static`, not `c++_shared` (the system
+  `libc++_shared.so` on Android 9 conflicts by ABI)
 
-This covers `setup`, `test`, and any future `compile`/`install`/`reconfigure`
-wrapper — every meson command that pickle-loads the build dir. They SHALL use
-`$(PYTHON_FOR_MESON) $(FRIDA_MESON)`, the same fork that `setup` used to write
-`build/meson-private/coredata.dat`. The system meson (a different version)
-SHALL NOT be used for any such target, because it cannot load the pickle
-frida-meson wrote (`ModuleNotFoundError: mesonbuild.options` / "generated with
-an old version of meson"). The `build` target (`ninja -C build`) is exempt: it
-runs the generated `build.ninja` and does not load the pickle. In particular,
-`make test` SHALL run `$(PYTHON_FOR_MESON) $(FRIDA_MESON) test -C $(BUILD_DIR)`
-rather than bare `meson test`.
+#### Scenario: LOG_DISABLED at directory scope
 
-#### Scenario: make test loads the frida-meson build dir
-- **WHEN** `make test` runs after `make setup`
-- **THEN** it invokes frida's meson (the same `$(FRIDA_MESON)` that wrote
-  `coredata.dat`), loads the build dir without a pickle-version error, and
-  runs the host unit tests
+- **WHEN** the hooker is compiled
+- **THEN** `LOG_DISABLED` is defined via `add_compile_definitions` at directory
+  scope (reaching C++23-module BMIs), and unguarded `__android_log_print` is
+      wrapped in `#ifndef LOG_DISABLED`
 
-#### Scenario: make test no longer uses the system meson
-- **WHEN** the `test` recipe in `Makefile` is examined
-- **THEN** it is `$(PYTHON_FOR_MESON) $(FRIDA_MESON) test -C $(BUILD_DIR)`,
-  not a bare `meson test -C $(BUILD_DIR)`
+#### Scenario: lsplant.hpp from source
 
-#### Scenario: build target is unaffected
-- **WHEN** `make build` runs
-- **THEN** it runs `ninja -C $(BUILD_DIR)` (no meson pickle load) and is
-  unchanged by this requirement
+- **WHEN** LSPlant is built
+- **THEN** it uses the committed source `lsplant.hpp`, not the Maven-published
+  header (whose `InitInfo` ABI lacks `Allocator`/`Recycler`)
+
+#### Scenario: LTO disabled
+
+- **WHEN** the native artifacts are linked
+- **THEN** `-flto` is not applied
+
+### Requirement: Rust and C/C++ lint
+
+The project SHALL lint Rust code with `cargo clippy` configured to deny
+warnings, and SHALL lint C/C++ code with `uncrustify` (using the committed
+config). `make lint` SHALL run both linters; `make check` SHALL verify that
+every required tool (including `cargo`, `uncrustify`, and the NDK) is present
+and report any missing tool by name with a non-zero exit. A lint failure SHALL
+fail the build.
+
+#### Scenario: Rust lint runs
+
+- **WHEN** `make lint` runs
+- **THEN** it invokes `cargo clippy` with warnings denied, and a clippy
+  warning fails the lint step
+
+#### Scenario: C/C++ lint runs
+
+- **WHEN** `make lint` runs
+- **THEN** it invokes `uncrustify` over the C/C++ sources, and a style
+  violation fails the lint step
+
+#### Scenario: Missing tool reported by name
+
+- **WHEN** `make check` runs and a required tool (`cargo`, `uncrustify`, or the
+  NDK) is absent
+- **THEN** it reports that tool by name and exits non-zero
 
