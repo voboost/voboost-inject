@@ -11,6 +11,7 @@ pub mod control_plane;
 pub mod injector;
 pub mod log;
 pub mod manifest;
+pub mod ota;
 pub mod plan;
 pub mod process_watcher;
 pub mod reconcile;
@@ -42,6 +43,12 @@ fn main() {
     }
 
     // --- Verify self (manifest sig + agent sha256) ---
+    // Boot recovery: restore manifest.json from .prev if the active copy is
+    // absent or fails verification after a power-loss-interrupted swap. Runs
+    // before VERIFY_SELF so a recoverable swap does not cause a DEGRADED start.
+    if ota::recover_manifest() {
+        log::ok("main", "manifest recovered; re-verifying");
+    }
     let manifest = match verify_self() {
         Some(m) => m,
         None => {
