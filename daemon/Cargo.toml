@@ -35,3 +35,7 @@ libc = "0.2"
 [build-dependencies]
 # build.rs: embed EMBEDDED_PUBKEY, generate version
 anyhow = "1"
+
+[dev-dependencies]
+# tempfile: unit tests that need temporary payload files
+tempfile = "3"

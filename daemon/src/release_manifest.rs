@@ -212,6 +212,50 @@ impl ReleaseManifest {
     }
 }
 
+/// Outcome of verifying an ABI's native payload against the release manifest.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PayloadVerify {
+    /// Every payload file for the ABI matches its manifest sha256.
+    Ok,
+    /// A required payload file is not listed for this ABI in the manifest.
+    MissingFromManifest(String),
+    /// A payload file's on-disk sha256 differs from the manifest value.
+    HashMismatch(String),
+}
+
+/// Verify the on-disk native payload files for `abi` against the verified
+/// release manifest (trust-verification: "Native payload verification via the
+/// release manifest"). Returns the first failure or `Ok` when every required
+/// payload file matches. Device-only in practice — the payload files live in
+/// `PAYLOAD_DIR` on the device, not the build host.
+pub fn verify_payload_for_abi(rm: &ReleaseManifest, abi: &str) -> PayloadVerify {
+    verify_payload_paths(rm, abi, |name| {
+        format!("{}/{abi}/{name}", config::PAYLOAD_DIR)
+    })
+}
+
+/// Pure core of payload verification: walk every payload file for `abi`,
+/// resolve its on-disk path via `path_for`, and compare its sha256 to the
+/// manifest value. Separated from `verify_payload_for_abi` so it can be unit
+/// tested with temporary files instead of `PAYLOAD_DIR`.
+fn verify_payload_paths<F: Fn(&str) -> String>(
+    rm: &ReleaseManifest,
+    abi: &str,
+    path_for: F,
+) -> PayloadVerify {
+    for name in PAYLOAD_FILES {
+        match rm.payload_sha256(name, abi) {
+            None => return PayloadVerify::MissingFromManifest(name.into()),
+            Some(expected) => {
+                if !trust::verify_payload(&path_for(name), expected) {
+                    return PayloadVerify::HashMismatch(name.into());
+                }
+            }
+        }
+    }
+    PayloadVerify::Ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +365,124 @@ mod tests {
             {"path":"agent.dex","channel":"agents","sha256":"aa","size":10,"version":"1"}
         ]}"#;
         assert!(ReleaseManifest::parse(json.as_bytes()).is_some());
+    }
+
+    // --- Payload verification against the release manifest (trust-verification) ---
+
+    #[test]
+    fn payload_verify_ok_when_hashes_match() {
+        // Build manifest sha values from the same files we then verify.
+        let dir = tempfile::tempdir().unwrap();
+        let abi = "arm64-v8a";
+        let prefix = dir.path().to_str().unwrap().to_string();
+        let mut entries = Vec::new();
+        for name in PAYLOAD_FILES {
+            let p = format!("{prefix}/{name}");
+            std::fs::write(&p, b"payload-bytes").unwrap();
+            let sha = trust::sha256_file(&p).unwrap();
+            entries.push(format!(
+                r#"{{"path":"payload/{abi}/{name}","channel":"inject",
+                       "sha256":"{sha}","size":13,"version":"1","abi":"{abi}"}}"#
+            ));
+        }
+        let other = "armeabi-v7a";
+        for name in PAYLOAD_FILES {
+            entries.push(format!(
+                r#"{{"path":"payload/{other}/{name}","channel":"inject",
+                       "sha256":"ff","size":13,"version":"1","abi":"{other}"}}"#
+            ));
+        }
+        let json = format!(
+            r#"{{"version":"1","channel":"inject","files":[{}]}}"#,
+            entries.join(",")
+        );
+        let rm = ReleaseManifest::parse(json.as_bytes()).unwrap();
+        assert_eq!(
+            verify_payload_paths(&rm, abi, |n| format!("{prefix}/{n}")),
+            PayloadVerify::Ok
+        );
+    }
+
+    #[test]
+    fn payload_verify_hash_mismatch_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let abi = "arm64-v8a";
+        let prefix = dir.path().to_str().unwrap().to_string();
+        let mut entries = Vec::new();
+        for name in PAYLOAD_FILES {
+            let p = format!("{prefix}/{name}");
+            std::fs::write(&p, b"payload-bytes").unwrap();
+            // Wrong sha → mismatch.
+            entries.push(format!(
+                r#"{{"path":"payload/{abi}/{name}","channel":"inject",
+                       "sha256":"00","size":13,"version":"1","abi":"{abi}"}}"#
+            ));
+        }
+        let other = "armeabi-v7a";
+        for name in PAYLOAD_FILES {
+            entries.push(format!(
+                r#"{{"path":"payload/{other}/{name}","channel":"inject",
+                       "sha256":"ff","size":13,"version":"1","abi":"{other}"}}"#
+            ));
+        }
+        let json = format!(
+            r#"{{"version":"1","channel":"inject","files":[{}]}}"#,
+            entries.join(",")
+        );
+        let rm = ReleaseManifest::parse(json.as_bytes()).unwrap();
+        assert_eq!(
+            verify_payload_paths(&rm, abi, |n| format!("{prefix}/{n}")),
+            PayloadVerify::HashMismatch("libimplant.so".into())
+        );
+    }
+
+    #[test]
+    fn payload_verify_missing_from_manifest_rejected() {
+        // Manifest lists only the other ABI → lookup for this ABI is None.
+        let dir = tempfile::tempdir().unwrap();
+        let abi = "arm64-v8a";
+        let prefix = dir.path().to_str().unwrap().to_string();
+        let mut entries = Vec::new();
+        for name in PAYLOAD_FILES {
+            let p = format!("{prefix}/{name}");
+            std::fs::write(&p, b"payload-bytes").unwrap();
+        }
+        // Only arm64 listed; verify asks for armeabi-v7a → MissingFromManifest.
+        for name in PAYLOAD_FILES {
+            let sha = trust::sha256_file(&format!("{prefix}/{name}")).unwrap();
+            entries.push(format!(
+                r#"{{"path":"payload/{abi}/{name}","channel":"inject",
+                       "sha256":"{sha}","size":13,"version":"1","abi":"{abi}"}}"#
+            ));
+        }
+        let json = format!(
+            r#"{{"version":"1","channel":"inject","files":[{}]}}"#,
+            entries.join(",")
+        );
+        // Parse as-is: one-ABI gap → None. Inject a sibling ABI entry with a
+        // bogus sha so coverage passes, then verify the *absent* ABI.
+        let rm = ReleaseManifest::parse(json.as_bytes());
+        assert!(rm.is_none()); // one-ABI gap rejected at parse time
+
+        // Build a complete manifest covering both ABIs, then verify an ABI that
+        // has no payload entries at all (simulate missing file).
+        let mut entries2 = entries.clone();
+        let other = "armeabi-v7a";
+        for name in PAYLOAD_FILES {
+            entries2.push(format!(
+                r#"{{"path":"payload/{other}/{name}","channel":"inject",
+                       "sha256":"ff","size":13,"version":"1","abi":"{other}"}}"#
+            ));
+        }
+        let json2 = format!(
+            r#"{{"version":"1","channel":"inject","files":[{}]}}"#,
+            entries2.join(",")
+        );
+        let rm2 = ReleaseManifest::parse(json2.as_bytes()).unwrap();
+        // Verifying a bogus ABI never listed → MissingFromManifest.
+        assert_eq!(
+            verify_payload_paths(&rm2, "x86", |_| String::from("/nonexistent")),
+            PayloadVerify::MissingFromManifest("libimplant.so".into())
+        );
     }
 }

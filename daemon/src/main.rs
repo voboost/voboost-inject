@@ -147,6 +147,47 @@ fn write_degraded_status() {
     status.write_atomic();
 }
 
+/// Verify the native payload for `abi` against the release manifest before
+/// injecting it into `process` (trust-verification). Returns true when the
+/// payload is verified and injection may proceed; false (fail-closed) when the
+/// manifest is absent, a required payload file is missing, or a hash mismatches.
+fn verify_payload_before_inject(
+    release_manifest: &Option<release_manifest::ReleaseManifest>,
+    abi: &str,
+    process: &str,
+) -> bool {
+    let Some(rm) = release_manifest else {
+        log::err(
+            "main",
+            "release-manifest absent: payload unverified, skip inject",
+        );
+        return false;
+    };
+    match release_manifest::verify_payload_for_abi(rm, abi) {
+        release_manifest::PayloadVerify::Ok => true,
+        release_manifest::PayloadVerify::MissingFromManifest(name) => {
+            log::err(
+                "main",
+                &format!(
+                    "payload {name} missing for {abi} in release-manifest; \
+                     skip {process}"
+                ),
+            );
+            false
+        }
+        release_manifest::PayloadVerify::HashMismatch(name) => {
+            log::err(
+                "main",
+                &format!(
+                    "payload {name} sha256 mismatch for {abi}; \
+                     skip {process}"
+                ),
+            );
+            false
+        }
+    }
+}
+
 /// Run the daemon loop: poll /proc, reconcile, inject, monitor.
 ///
 /// daemon-lifecycle: runs on the main thread (blocking poll). SIGTERM is
@@ -232,6 +273,11 @@ fn run_daemon(manifest: manifest::Manifest) {
         let boot_done = boot_state.boot_completed();
 
         // Inject new appearances.
+        // Load the release manifest once per pass: it is the trust anchor for
+        // the native payload (trust-verification). A missing/unverified manifest
+        // is fail-closed — no payload may be injected without an integrity check.
+        let release_manifest = release_manifest::ReleaseManifest::load();
+
         for (process, pid) in &appeared {
             // Skip degraded targets.
             if safety.is_target_degraded(process) {
@@ -287,6 +333,15 @@ fn run_daemon(manifest: manifest::Manifest) {
             // agents mapped to this process).
             let config_json = plan.config_for_process(process, &manifest);
             let _ = control_plane::write_config(process, &config_json);
+
+            // Verify the native payload's sha256 against the verified release
+            // manifest before injecting (trust-verification). Fail-closed: a
+            // missing manifest or any payload mismatch refuses the injection.
+            if !verify_payload_before_inject(&release_manifest, abi, process) {
+                safety.note_failure("", process);
+                status.set_injection("", process, status::InjectionState::Failed);
+                continue;
+            }
 
             let result = injector::inject(*pid, abi);
             match result {
