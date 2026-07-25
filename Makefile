@@ -304,8 +304,8 @@ release-manifest:
 
 # OTA system-OTA survival (owned by the ota change). After a system OTA reverts
 # /system, the operator runs this on-device via adb to restore the guarded
-# init-hook block that launches /data/voboost/voboost-inject. Idempotent: a hook
-# that already contains the block is left untouched. HOOK=<on-device path>.
+# init-hook block that launches /data/voboost-inject/voboost-inject. Idempotent:
+# a hook that already contains the block is left untouched. HOOK=<on-device path>.
 # Requires root (/system remounted RW). The restart-on-exit behavior the inject
 # update depends on is set up by initial device provisioning (out of scope); this
 # step only restores the launch of the stable path.
@@ -318,9 +318,9 @@ device-rearm:
 	  echo "device-rearm: hook already armed; nothing to do"; \
 	else \
 	  printf '\n%s\n' "$$begin" >> "$(HOOK)"; \
-	  printf '%s\n' "# Launches /data/voboost/voboost-inject once; init/watchdog restarts on exit." >> "$(HOOK)"; \
+	  printf '%s\n' "# Launches /data/voboost-inject/voboost-inject once; init/watchdog restarts on exit." >> "$(HOOK)"; \
 	  printf '%s\n' "# No fork-loop: single-instance is enforced by the daemon (pidfile + flock)." >> "$(HOOK)"; \
-	  printf '%s\n' "exec /data/voboost/voboost-inject" >> "$(HOOK)"; \
+	  printf '%s\n' "exec /data/voboost-inject/voboost-inject" >> "$(HOOK)"; \
 	  printf '%s\n' "$$end" >> "$(HOOK)"; \
 	  echo "device-rearm: armed $(HOOK)"; \
 	fi
@@ -334,14 +334,14 @@ device-rearm:
 # reproduces the production start timing exactly: the production hook
 # (voboost-install INIT_HOOK_BODY) runs the service on property:sys.boot_completed=1
 # (service disabled+oneshot), so a host-driven start is not later than production.
-# Provisions /data/voboost from test/fixtures (root:root 700), pushes the
+# Provisions /data/voboost-inject from test/fixtures (root:root 700), pushes the
 # cross-built daemon + signed manifest + agents, then starts the daemon under
 # `su 0` (single-instance enforced by the daemon's pidfile + flock).
 #   ADB=<adb>            adb binary (default: adb on PATH)
 #   EMU_SERIAL=<serial>  emulator serial (default: emulator-5554)
 ADB ?= adb
 EMU_SERIAL ?= emulator-5554
-EMU_ZONE ?= /data/voboost
+EMU_ZONE ?= /data/voboost-inject
 EMU_APP_ZONE ?= /data/user/0/ru.voboost
 EMU_BIN ?= $(ANDROID_BUILD_DIR)/src/voboost-inject
 
