@@ -77,7 +77,9 @@ static const char *ENTRY_CLASS = AGENT_ENTRY_CLASS_NAME;
 /* ---- load native dependencies ---- */
 
 static bool load_native_libs() {
-    if (g_libs_loaded.load(std::memory_order_acquire)) return true;
+    if (g_libs_loaded.load(std::memory_order_acquire)) {
+        return true;
+    }
 
     /* liblsplant.so — dlopen with RTLD_GLOBAL so C++ symbols are visible. */
     void *p = dlopen("liblsplant.so", RTLD_NOW | RTLD_GLOBAL);
@@ -101,22 +103,24 @@ static bool load_native_libs() {
 /* ---- LSPlant init ---- */
 
 static bool init_lsplant(JNIEnv *env) {
-    if (!load_native_libs()) return false;
+    if (!load_native_libs()) {
+        return false;
+    }
 
     lsplant::InitInfo info{
         .inline_hooker = [](void *target, void *hooker) -> void * {
-            return vbi_dobby_inline_hooker(target, hooker);
-        },
+                             return vbi_dobby_inline_hooker(target, hooker);
+                         },
         .inline_unhooker = [](void *func) -> bool {
-            return vbi_dobby_inline_unhooker(func);
-        },
+                               return vbi_dobby_inline_unhooker(func);
+                           },
         .art_symbol_resolver = [](std::string_view sym) -> void * {
-            std::string name(sym);
-            return safe_resolve_symbol("libart.so", name.c_str());
-        },
+                                   std::string name(sym);
+                                   return safe_resolve_symbol("libart.so", name.c_str());
+                               },
         .art_symbol_prefix_resolver = [](std::string_view) -> void * {
-            return nullptr; /* LSPlant marks this "May be null" */
-        },
+                                          return nullptr; /* LSPlant marks this "May be null" */
+                                      },
     };
 
     bool ok = p_lsplant_init(env, info);

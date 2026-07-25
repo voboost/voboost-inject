@@ -74,17 +74,21 @@ static int detect_bitness(int pid) {
     n = readlink(exe_path, buf, sizeof(buf) - 1);
     if (n > 0) {
         buf[n] = '\0';
-        if (strstr(buf, "app_process32") || strstr(buf, "app_process32_real"))
+        if (strstr(buf, "app_process32") || strstr(buf, "app_process32_real")) {
             return 32;
-        if (strstr(buf, "app_process64") || strstr(buf, "app_process"))
+        }
+        if (strstr(buf, "app_process64") || strstr(buf, "app_process")) {
             return 64;
+        }
     }
 
     /* Method 2: scan maps for /lib64/ (64-bit) vs absence (32-bit) */
     char maps_path[64];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     FILE *f = fopen(maps_path, "r");
-    if (!f) return 0;
+    if (!f) {
+        return 0;
+    }
     while (fgets(buf, sizeof(buf), f)) {
         if (strstr(buf, "/lib64/")) {
             fclose(f);
@@ -108,14 +112,16 @@ static u64 remote_call64(int pid, u64 func_addr, u64 args[], int nargs) {
     struct arm64_regs regs;
     struct iovec iov = { &regs, sizeof(regs) };
 
-    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0)
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0) {
         return 0;
+    }
 
     struct arm64_regs orig = regs; /* save for restore */
 
     /* Set arguments x0..x7 */
-    for (int i = 0; i < nargs && i < 8; i++)
+    for (int i = 0; i < nargs && i < 8; i++) {
         regs.regs[i] = args[i];
+    }
 
     /* LR=0: function returns to address 0 → SIGSEGV = call completed */
     regs.regs[30] = 0;
@@ -126,11 +132,13 @@ static u64 remote_call64(int pid, u64 func_addr, u64 args[], int nargs) {
     regs.pc = func_addr;
 
     iov.iov_len = sizeof(regs);
-    if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0)
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0) {
         return 0;
+    }
 
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0)
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
         return 0;
+    }
 
     int status;
     waitpid(pid, &status, 0);
@@ -170,14 +178,16 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
     struct user_regs_32 regs;
     struct iovec iov = { &regs, sizeof(regs) };
 
-    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0)
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0) {
         return 0;
+    }
 
     struct user_regs_32 orig = regs;
 
     /* Set arguments r0..r3 (ARM calling convention: first 4 in registers) */
-    for (int i = 0; i < nargs && i < 4; i++)
+    for (int i = 0; i < nargs && i < 4; i++) {
         regs.uregs[i] = (unsigned long)args[i];
+    }
 
     /* LR=0: function returns to address 0 → SIGSEGV = call completed */
     regs.uregs[14] = 0;
@@ -188,15 +198,18 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
     /* Set PC; Thumb bit (bit 0) if target is in Thumb mode */
     regs.uregs[15] = (unsigned long)func_addr;
     /* If original PC had Thumb bit set, preserve it */
-    if (orig.uregs[15] & 1)
+    if (orig.uregs[15] & 1) {
         regs.uregs[15] |= 1;
+    }
 
     iov.iov_len = sizeof(regs);
-    if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0)
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0) {
         return 0;
+    }
 
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0)
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
         return 0;
+    }
 
     int status;
     waitpid(pid, &status, 0);
@@ -226,13 +239,15 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
  * Returns 0 on success, negative on error (see injector.h).
  */
 int vbi_inject(int pid, const char *so_path, const char *init_sym) {
-    if (!so_path || pid <= 0)
+    if (!so_path || pid <= 0) {
         return -1;
+    }
 
     /* 1. Attach to the target. */
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0)
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
         return -1; /* denied (permission or SELinux) */
 
+    }
     int status;
     int ret = -1;
     waitpid(pid, &status, 0);
@@ -286,20 +301,22 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
     u64 args[3] = { str_addr, 2 /* RTLD_NOW */, caller_addr };
     u64 handle;
 
-    if (bitness == 64)
+    if (bitness == 64) {
         handle = remote_call64(pid, dlopen_addr, args, 3);
-    else
+    }else {
         handle = remote_call32(pid, dlopen_addr, args, 3);
+    }
 
     if (handle == 0) {
         /* dlopen failed — try to get dlerror for diagnostics. */
         u64 dlerror_addr = resolve_loader_symbol(pid, "__loader_dlerror");
         if (dlerror_addr) {
             u64 dlerr_result;
-            if (bitness == 64)
+            if (bitness == 64) {
                 dlerr_result = remote_call64(pid, dlerror_addr, NULL, 0);
-            else
+            }else {
                 dlerr_result = remote_call32(pid, dlerror_addr, NULL, 0);
+            }
             (void)dlerr_result; /* could read the error string for logging */
         }
         ret = -3; /* dlopen failed */
@@ -321,10 +338,11 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
             /* dlsym(handle, init_sym, caller_addr) */
             u64 sym_args[3] = { handle, sym_str_addr, caller_addr };
             u64 init_addr;
-            if (bitness == 64)
+            if (bitness == 64) {
                 init_addr = remote_call64(pid, dlsym_addr, sym_args, 3);
-            else
+            }else {
                 init_addr = remote_call32(pid, dlsym_addr, sym_args, 3);
+            }
 
             if (init_addr == 0) {
                 ret = -4; /* init symbol not found */
@@ -336,10 +354,11 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
              * (the real config path is delivered via channel B — the
              * daemon passes it separately in injection-control). */
             u64 init_args[1] = { str_addr };
-            if (bitness == 64)
+            if (bitness == 64) {
                 remote_call64(pid, init_addr, init_args, 1);
-            else
+            }else {
                 remote_call32(pid, init_addr, init_args, 1);
+            }
         }
     }
 

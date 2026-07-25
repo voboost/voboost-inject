@@ -43,8 +43,9 @@ struct arm64_regs {
  */
 int regs_get64(int pid, struct arm64_regs *out) {
     struct iovec iov = { out, sizeof(*out) };
-    if (ptrace(PTRACE_GETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0)
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0) {
         return -1;
+    }
     return 0;
 }
 
@@ -54,8 +55,9 @@ int regs_get64(int pid, struct arm64_regs *out) {
  */
 int regs_set64(int pid, const struct arm64_regs *regs) {
     struct iovec iov = { (void *)regs, sizeof(*regs) };
-    if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0)
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0) {
         return -1;
+    }
     return 0;
 }
 
@@ -82,8 +84,9 @@ struct user_regs_32 {
  */
 int regs_get32(int pid, struct user_regs_32 *out) {
     struct iovec iov = { out, sizeof(*out) };
-    if (ptrace(PTRACE_GETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0)
+    if (ptrace(PTRACE_GETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0) {
         return -1;
+    }
     return 0;
 }
 
@@ -93,7 +96,8 @@ int regs_get32(int pid, struct user_regs_32 *out) {
  */
 int regs_set32(int pid, const struct user_regs_32 *regs) {
     struct iovec iov = { (void *)regs, sizeof(*regs) };
-    if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0)
+    if (ptrace(PTRACE_SETREGSET, pid, (void *)NT_PRSTATUS, &iov) < 0) {
         return -1;
+    }
     return 0;
 }

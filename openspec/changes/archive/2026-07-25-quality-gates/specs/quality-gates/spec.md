@@ -54,7 +54,7 @@ sources, rewriting them to canonical style. Rust source formatting SHALL be
 enforced by `cargo fmt` (run by `make lint-fix`); a formatting drift SHALL fail
 `make lint`.
 
-#### Scenario: A C/C++ file has a bare if without braces
+#### Scenario: File has a bare if without braces
 
 - **WHEN** a C/C++ source contains `if (cond) statement;` without `{}`
 - **THEN** `uncrustify --check` exits non-zero and `make lint` fails

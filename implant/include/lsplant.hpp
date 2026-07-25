@@ -25,7 +25,7 @@ struct InitInfo {
     /// In \ref std::function form so that user can use lambda expression with capture list.<br>
     /// \p func is the target function that is previously hooked.<br>
     /// \p return should indicate the status of unhooking.<br>
-    using InlineUnhookFunType = std::function<bool(void *func)>;
+    using InlineUnhookFunType = std::function<bool (void *func)>;
     /// \brief Type of symbol resolver to \p libart.so.
     /// In \ref std::function form so that user can use lambda expression with capture list.<br>
     /// \p symbol_name is the symbol name that needs to retrieve.<br>
@@ -51,7 +51,7 @@ struct InitInfo {
     /// \brief Type of memory recycler for executable code.
     /// In \ref std::function form, but it MUST NOT have a capture list.<br>
     /// \p memory is the start address of the memory previously allocated by \ref MemoryAllocator.
-    using MemoryRecycler = std::function<void(void *memory)>;
+    using MemoryRecycler = std::function<void (void *memory)>;
 
     /// \brief The inline hooker function. Must not be null.
     InlineHookFunType inline_hooker;

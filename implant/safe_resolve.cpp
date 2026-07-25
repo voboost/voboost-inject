@@ -29,7 +29,9 @@
 static void *resolve_from_file(const char *path, const char *symname,
                                uintptr_t load_bias) {
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return nullptr;
+    if (fd < 0) {
+        return nullptr;
+    }
 
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(ElfW(Ehdr))) {
@@ -39,14 +41,17 @@ static void *resolve_from_file(const char *path, const char *symname,
 
     void *map = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-    if (map == MAP_FAILED) return nullptr;
+    if (map == MAP_FAILED) {
+        return nullptr;
+    }
 
-    const ElfW(Ehdr) *ehdr = (const ElfW(Ehdr) *)map;
+    const ElfW(Ehdr) *ehdr = (const ElfW(Ehdr) *) map;
     void *result = nullptr;
 
     if (ehdr->e_shoff == 0 || ehdr->e_shnum == 0 ||
-        ehdr->e_shoff >= (ElfW(Addr))st.st_size)
+        ehdr->e_shoff >= (ElfW(Addr)) st.st_size) {
         goto done;
+    }
 
     {
         const ElfW(Shdr) *shdr =
@@ -98,7 +103,9 @@ done:
 void *safe_resolve_symbol(const char *libname, const char *symname) {
     /* 1. dlsym — resolves .dynsym exports */
     void *addr = dlsym(RTLD_DEFAULT, symname);
-    if (addr) return addr;
+    if (addr) {
+        return addr;
+    }
 
     /* 2. Find the loaded module's path + load_bias, parse .symtab from file */
     struct Ctx {
@@ -110,13 +117,17 @@ void *safe_resolve_symbol(const char *libname, const char *symname) {
 
     dl_iterate_phdr(
         [](struct dl_phdr_info *info, size_t, void *data) -> int {
-            auto *c = static_cast<Ctx *>(data);
-            if (c->result) return 0;
-            if (!info->dlpi_name || !strstr(info->dlpi_name, c->lib)) return 0;
-            c->result =
-                resolve_from_file(info->dlpi_name, c->sym, info->dlpi_addr);
-            return c->result ? 1 : 0;
-        },
+        auto *c = static_cast<Ctx *>(data);
+        if (c->result) {
+            return 0;
+        }
+        if (!info->dlpi_name || !strstr(info->dlpi_name, c->lib)) {
+            return 0;
+        }
+        c->result =
+            resolve_from_file(info->dlpi_name, c->sym, info->dlpi_addr);
+        return c->result ? 1 : 0;
+    },
         &ctx);
 
     return ctx.result;

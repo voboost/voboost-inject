@@ -18,8 +18,9 @@
 extern "C" void *vbi_dobby_inline_hooker(void *target, void *hooker) {
     void *origin = nullptr;
     int rc = DobbyHook(target, hooker, &origin);
-    if (rc != 0)
+    if (rc != 0) {
         return nullptr;
+    }
     return origin;
 }
 

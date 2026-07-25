@@ -39,7 +39,9 @@ int target_read_mem(int pid, u64 addr, void *buf, size_t len) {
         for (size_t i = 0; i < len; i += sizeof(long)) {
             errno = 0;
             long word = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + i), NULL);
-            if (errno != 0) return -1;
+            if (errno != 0) {
+                return -1;
+            }
             size_t n = (len - i < sizeof(long)) ? (len - i) : sizeof(long);
             memcpy((char *)buf + i, &word, n);
         }
@@ -55,7 +57,9 @@ int target_write_mem(int pid, u64 addr, const void *buf, size_t len) {
     struct iovec local = { (void *)buf, len };
     struct iovec remote = { (void *)addr, len };
     ssize_t n = process_vm_writev(pid, &local, 1, &remote, 1, 0);
-    if (n == (ssize_t)len) return 0;
+    if (n == (ssize_t)len) {
+        return 0;
+    }
 
     /* Fallback: PTRACE_POKEDATA word-at-a-time (arm64 word = 8 bytes). */
     size_t aligned = (len + 7) & ~7UL;
@@ -65,8 +69,9 @@ int target_write_mem(int pid, u64 addr, const void *buf, size_t len) {
     for (size_t i = 0; i < aligned; i += sizeof(long)) {
         long word;
         memcpy(&word, tmp + i, sizeof(long));
-        if (ptrace(PTRACE_POKEDATA, pid, (void *)(addr + i), (void *)word) < 0)
+        if (ptrace(PTRACE_POKEDATA, pid, (void *)(addr + i), (void *)word) < 0) {
             return -1;
+        }
     }
     return 0;
 }
@@ -76,8 +81,12 @@ int target_write_mem(int pid, u64 addr, const void *buf, size_t len) {
  */
 int target_verify_mem(int pid, u64 addr, const void *expected, size_t len) {
     char tmp[256];
-    if (len > sizeof(tmp)) len = sizeof(tmp);
-    if (target_read_mem(pid, addr, tmp, len) < 0) return -1;
+    if (len > sizeof(tmp)) {
+        len = sizeof(tmp);
+    }
+    if (target_read_mem(pid, addr, tmp, len) < 0) {
+        return -1;
+    }
     return memcmp(tmp, expected, len) == 0 ? 0 : -1;
 }
 
@@ -97,7 +106,9 @@ u64 find_linker64_rxp_base(int pid) {
     u64 base = 0;
     snprintf(path, sizeof(path), "/proc/%d/maps", pid);
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) {
+        return 0;
+    }
     while (fgets(line, sizeof(line), f)) {
         if ((strstr(line, "/linker64") || strstr(line, "/bin/linker"))
             && strstr(line, "r-xp")) {
@@ -122,7 +133,9 @@ u64 find_target_caller_addr(int pid) {
     u64 base = 0;
     snprintf(path, sizeof(path), "/proc/%d/maps", pid);
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f) {
+        return 0;
+    }
     while (fgets(line, sizeof(line), f)) {
         /* Prefer app_process64 (or app_process32 for 32-bit targets). */
         if ((strstr(line, "app_process64") || strstr(line, "app_process"))
@@ -156,7 +169,9 @@ u64 resolve_loader_symbol(int pid, const char *sym_name) {
     (void)sym_name; /* offset-based for now; full DT_DYNAMIC walk is Phase 1 */
 
     u64 linker_base = find_linker64_rxp_base(pid);
-    if (!linker_base) return 0;
+    if (!linker_base) {
+        return 0;
+    }
 
     /* Known offsets on the target device (Android 9, kernel 4.14.156-perf+):
      *   __loader_dlopen  = 0x14244
@@ -165,12 +180,15 @@ u64 resolve_loader_symbol(int pid, const char *sym_name) {
      * These are determined via `nm linker64` and are device-specific.
      * Phase 1 hardening will replace these with runtime PT_DYNAMIC parsing.
      */
-    if (strcmp(sym_name, "__loader_dlopen") == 0)
+    if (strcmp(sym_name, "__loader_dlopen") == 0) {
         return linker_base + 0x14244;
-    if (strcmp(sym_name, "__loader_dlsym") == 0)
+    }
+    if (strcmp(sym_name, "__loader_dlsym") == 0) {
         return linker_base + 0x14294;
-    if (strcmp(sym_name, "__loader_dlerror") == 0)
+    }
+    if (strcmp(sym_name, "__loader_dlerror") == 0) {
         return linker_base + 0x1412c;
+    }
 
     return 0;
 }
