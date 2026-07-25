@@ -91,6 +91,13 @@ work identically on a developer machine and in CI.
   is 29, and fails early with a clear message if it is not set or the version
   is wrong
 
+#### Scenario: vala-lint has no OS package
+
+- **WHEN** the build moved off the frida/meson/Vala toolchain
+- **THEN** `make init` no longer builds `io.elementary.vala-lint` from source
+  (the Vala linter is removed with the Vala stack); linting is `cargo clippy`/
+  `cargo fmt` for Rust and `uncrustify` for C/C++ (see `quality-gates`)
+
 #### Scenario: Provisioned tools resolve without profile edits
 
 - **WHEN** any `make` target that needs a provisioned tool runs after `make init`
@@ -130,7 +137,7 @@ OS-package install and Rust toolchain setup.
 missing tool by name with a non-zero exit, rather than failing opaquely later
 during lint or build.
 
-#### Scenario: A tool is missing
+#### Scenario: A linter is missing
 
 - **WHEN** `make check` runs and `cargo` (or `uncrustify`, or NDK r29) is
   absent

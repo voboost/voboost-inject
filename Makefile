@@ -232,6 +232,43 @@ release-manifest:
 	} > "$$out"; \
 	echo "Wrote $$out"
 
+.PHONY: device-provision device-init-hook device-rearm
+
+# Device zone provisioning (provisioning spec). Run ON-DEVICE via
+# `adb shell su 0 make device-provision` (requires root). Creates the root
+# zone /data/voboost-inject/ with logs/, run/, shared/ (channel-B shared dir,
+# labeled media_rw_data_file via file_contexts — see selinux-domain), and
+# payload/ (native payload files). Correct ownership (root) and permissions.
+# Idempotent. SELinux labels are applied by restorecon after file_contexts is
+# installed (device-init-hook); labels are not set here.
+ZONE ?= /data/voboost-inject
+device-provision:
+	@mkdir -p $(ZONE)/logs $(ZONE)/run $(ZONE)/shared $(ZONE)/payload
+	@chown root:root $(ZONE)
+	@chmod 700 $(ZONE)
+	@chmod 700 $(ZONE)/logs $(ZONE)/run $(ZONE)/payload
+	@chmod 771 $(ZONE)/shared
+	@echo "device-provision: zone $(ZONE) ready (logs/run/shared/payload)"
+
+# Install the daemon init hook + SELinux policy on-device (provisioning spec).
+# Run ON-DEVICE via `adb shell su 0 make device-init-hook` (requires root,
+# /system remounted RW to install the .rc + policy). Installs:
+#   - config/voboost-inject.rc  → the init service (on nonencrypted, oneshot+
+#    disabled reboot-loop guard; self-update restart owned by ota)
+#   - selinux/voboost-inject.te + file_contexts → the SELinux domain + labels
+# Then runs restorecon to apply the labels (shared/ → media_rw_data_file).
+# Requires the files already pushed to the device (e.g. via adb push).
+RC_DIR ?= /system/etc/init
+SEPOLICY_DIR ?= /system/etc/selinux
+device-init-hook:
+	@test -w "$(RC_DIR)" || { echo "device-init-hook: $(RC_DIR) not writable (remount /system RW as root)" >&2; exit 2; }
+	@cp config/voboost-inject.rc $(RC_DIR)/voboost-inject.rc
+	@cp selinux/voboost-inject.te $(SEPOLICY_DIR)/voboost-inject.te 2>/dev/null || \
+		echo "device-init-hook: $(SEPOLICY_DIR) not present; skipping .te (pre-compiled policy devices differ)"
+	@cp selinux/file_contexts $(SEPOLICY_DIR)/file_contexts 2>/dev/null || true
+	@restorecon -RF $(ZONE) 2>/dev/null || echo "device-init-hook: restorecon skipped"
+	@echo "device-init-hook: init service + SELinux policy installed"
+
 .PHONY: device-rearm
 
 # OTA system-OTA survival (owned by the ota change). After a system OTA reverts

@@ -1,205 +1,192 @@
 ## Purpose
 Specify requirements for environment provisioning, toolchain checks, and Android cross-compilation.
 ## Requirements
-### Requirement: Pinned frida git wrap
-The project SHALL provide `subprojects/{frida,frida-core,frida-gum}.wrap` as `wrap-git` entries
-pinned to a fixed frida tag/commit, fetched and cached into `subprojects/` by `meson setup`, with no
-hardcoded local path and no offline override.
-
-#### Scenario: First meson setup fetches the pinned sources
-- **WHEN** `meson setup` runs on a fresh clone
-- **THEN** it fetches the pinned frida sources into `subprojects/` and caches them for reuse
-
-#### Scenario: Subsequent setup reuses the cache
-- **WHEN** `meson setup` runs again with the sources already fetched
-- **THEN** it reuses the cached checkout without re-fetching
-
 ### Requirement: Documented build toolchain including both linters
-The project SHALL document the complete toolchain required to build, lint, and test: a Vala
-compiler, meson, ninja, git, openssl (ed25519), bsdiff, an Android cross toolchain/NDK,
-**`uncrustify`**, and **`io.elementary.vala-lint`** — with versions or minimums.
+
+The project SHALL document the complete toolchain required to build, lint, and
+test: the Rust toolchain (`cargo`/`rustup`, pinned via `rust-toolchain.toml`),
+Android NDK r29, `uncrustify` (C/C++ lint), `git`, and `openssl` (ed25519 key
+generation) — with versions or minimums. `io.elementary.vala-lint` is no longer
+required (there is no Vala source).
 
 #### Scenario: Developer reads the toolchain list
+
 - **WHEN** a developer opens the developer docs
-- **THEN** they find the complete list of required tools, explicitly including both `uncrustify` and
-  `io.elementary.vala-lint`, with versions or minimums
+- **THEN** they find the complete list of required tools: the Rust toolchain,
+  NDK r29, `uncrustify`, `git`, and `openssl`, with versions or minimums, and
+  no mention of Vala or vala-lint
 
 ### Requirement: Deterministic tool installation via make init
-`make init` SHALL provision the environment deterministically: install the OS-package tools
-(including `uncrustify` and the libraries `vala-lint` needs), build `io.elementary.vala-lint` from a
-pinned git revision into the install prefix, fetch the pinned wraps up front
-(`meson subprojects download`), build the frida-patched Vala compiler
-(`valac` version suffix `-frida`) into the same install prefix from its
-transitively-pinned revision — the `[vala]` entry of
-frida's `releng` `deps.toml` at the releng commit recorded by the pinned frida-core checkout
-(`git ls-tree HEAD releng`), so bumping the frida pin updates the valac pin with no second
-hand-maintained number — then run `meson setup`, and generate the local dev keypair. The Makefile
-SHALL prepend the install prefix's `bin` to `PATH` so the provisioned tools (vala-lint, forked
-valac) are found by every `make` target without shell-profile edits. It SHALL work identically on a
-developer machine and in CI.
+
+`make init` SHALL provision the environment deterministically: install the
+OS-package tools (including `uncrustify`), install the Rust toolchain from the
+pinned `rust-toolchain.toml`, verify that NDK r29 is available
+(`ANDROID_NDK_HOME` set and the toolchain bin found), generate the local dev
+keypair, and prepend the install prefix's `bin` to `PATH`. It SHALL NOT fetch
+frida wraps, build a frida-patched `valac`, build `io.elementary.vala-lint`, or
+run `meson setup` (those were frida/meson-specific and are removed). It SHALL
+work identically on a developer machine and in CI.
 
 #### Scenario: Fresh clone is provisioned
+
 - **WHEN** a developer runs `make init` on a clean clone
-- **THEN** the OS-package tools and `uncrustify` are installed, `io.elementary.vala-lint` and the
-  frida-patched `valac` are built from their pinned revisions into the prefix, the pinned wraps are
-  fetched, and a dev keypair exists
+- **THEN** the OS-package tools and `uncrustify` are installed, the Rust
+  toolchain is installed from `rust-toolchain.toml`, NDK r29 is verified, and
+  a dev keypair exists
+
+#### Scenario: NDK r29 verified
+
+- **WHEN** `make init` runs
+- **THEN** it verifies `ANDROID_NDK_HOME` points at an NDK whose major version
+  is 29, and fails early with a clear message if it is not set or the version
+  is wrong
 
 #### Scenario: vala-lint has no OS package
-- **WHEN** provisioning runs on a system where `io.elementary.vala-lint` is not available via
-  Homebrew or apt
-- **THEN** `make init` builds it from the pinned git revision rather than assuming a package exists
+
+- **WHEN** the build moved off the frida/meson/Vala toolchain
+- **THEN** `make init` no longer builds `io.elementary.vala-lint` from source
+  (the Vala linter is removed with the Vala stack); linting is `cargo clippy`/
+  `cargo fmt` for Rust and `uncrustify` for C/C++ (see `quality-gates`)
 
 #### Scenario: Provisioned tools resolve without profile edits
+
 - **WHEN** any `make` target that needs a provisioned tool runs after `make init`
-- **THEN** the tool resolves via the Makefile-prepended prefix `bin` on `PATH`, with no manual
-  shell-profile setup
+- **THEN** the tool resolves via the Makefile-prepended prefix `bin` on `PATH`,
+  with no manual shell-profile setup
 
 ### Requirement: Per-OS installation instructions
-The developer documentation SHALL include installation guidance for macOS (Homebrew), Linux (apt),
-and Windows (WSL2). Each platform section SHALL be sufficient to provision all required tools, and
-SHALL state that `make init` automates the OS-package install plus the vala-lint source build.
+
+The developer documentation SHALL include installation guidance for macOS
+(Homebrew), Linux (apt), and Windows (WSL2). Each platform section SHALL be
+sufficient to provision all required tools (the Rust toolchain, NDK r29,
+`uncrustify`, `openssl`), and SHALL state that `make init` automates the
+OS-package install and Rust toolchain setup.
 
 #### Scenario: Developer installs on macOS
+
 - **WHEN** a developer follows the macOS instructions
-- **THEN** Homebrew provides Vala, meson, ninja, bsdiff, uncrustify, and vala-lint's libraries, and
-  `make init` builds `io.elementary.vala-lint` from source
+- **THEN** Homebrew provides the OS packages and `rustup` installs the Rust
+  toolchain, and `make init` verifies NDK r29
 
 #### Scenario: Developer installs on Linux
+
 - **WHEN** a developer follows the Linux (Ubuntu/Debian) instructions
-- **THEN** apt provides the OS-package tools and `make init` builds `io.elementary.vala-lint` from
-  source
+- **THEN** apt provides the OS-package tools and the Rust toolchain is
+  installed via `rustup`
 
 #### Scenario: Developer installs on Windows
+
 - **WHEN** a developer follows the Windows instructions
-- **THEN** they learn that WSL2 + Ubuntu is recommended and can follow the Linux path inside it
+- **THEN** they learn that WSL2 + Ubuntu is recommended and can follow the
+  Linux path inside it
 
 ### Requirement: Toolchain check reports any missing tool
-`make check` SHALL verify that every required tool is present — including both
-`uncrustify` and `io.elementary.vala-lint` — and SHALL report any missing tool by name with a
-non-zero exit, rather than failing opaquely later during lint or build.
+
+`make check` SHALL verify that every required tool is present — including
+`cargo` (the Rust toolchain), `uncrustify`, and NDK r29 — and SHALL report any
+missing tool by name with a non-zero exit, rather than failing opaquely later
+during lint or build.
 
 #### Scenario: A linter is missing
-- **WHEN** `make check` runs and `io.elementary.vala-lint` (or `uncrustify`) is absent
+
+- **WHEN** `make check` runs and `cargo` (or `uncrustify`, or NDK r29) is
+  absent
 - **THEN** it reports that tool by name and exits non-zero
 
 #### Scenario: All tools present
-- **WHEN** `make check` runs and every required tool, both linters included, is present
-- **THEN** it reports success and the environment is ready to build, lint, and test
+
+- **WHEN** `make check` runs and every required tool is present
+- **THEN** it reports success and the environment is ready to build, lint, and
+  test
 
 ### Requirement: Local dev keypair with verification always on
-`make key-dev` SHALL generate a personal ed25519 dev keypair (idempotently). The public key is for a
-local build to bake in; the private key SHALL be gitignored. Signature verification SHALL always be
-enabled — there SHALL be no skip-verify mode in any build.
+
+`make key-dev` SHALL generate a personal ed25519 dev keypair (idempotently).
+The public key is for a local build to bake in (via `build.rs` — see
+`build-and-signing`); the private key SHALL be gitignored. Signature
+verification SHALL always be enabled — there SHALL be no skip-verify mode in
+any build.
 
 #### Scenario: Developer generates a keypair
+
 - **WHEN** a developer runs `make key-dev` with no existing key
-- **THEN** an ed25519 keypair is generated, the private key is gitignored, and the public key is
-  available for `inject` to bake into a local build
+- **THEN** an ed25519 keypair is generated, the private key is gitignored, and
+  the public key is available for the daemon `build.rs` to bake into a local
+  build
 
 #### Scenario: No skip-verify mode exists
+
 - **WHEN** any build (dev or release) runs
 - **THEN** signature and hash verification are enforced and cannot be disabled
 
 ### Requirement: Android cross-compilation via meson cross-file
-The project SHALL provide `config/android-cross.ini`, a meson cross-file targeting
-`aarch64-linux-android` (arm64-v8a) via the Android NDK. `make build-android` SHALL invoke meson
-with this cross-file to produce a device binary. The cross-file SHALL be committed; the Android NDK
-itself is an external prerequisite documented in the README.
+
+The project SHALL cross-compile for Android via `cargo-ndk` (the daemon,
+targeting `aarch64-linux-android`) and NDK r29 `ndk-build`/CMake (the native
+artifacts — see `build-and-signing`). `make build-android` SHALL invoke these
+to produce a device binary and the per-ABI native artifacts. The Android NDK
+(version r29) is an external prerequisite documented in the README and verified
+by `make init`; `ANDROID_NDK_HOME` SHALL be set so the toolchain resolves.
+There is no meson cross-file.
 
 #### Scenario: Developer cross-compiles for the device
-- **WHEN** a developer runs `make build-android` with a working Android NDK
-- **THEN** it produces an arm64-v8a binary for the target device
+
+- **WHEN** a developer runs `make build-android` with `ANDROID_NDK_HOME` set to
+  a valid NDK r29
+- **THEN** it produces the daemon ELF (aarch64) and the per-ABI native
+  artifacts for the target device
 
 #### Scenario: Host build remains the default
-- **WHEN** a developer runs `make build` without any cross-file
+
+- **WHEN** a developer runs `make build` without any cross configuration
 - **THEN** it produces a host binary (for running tests locally)
 
-### Requirement: Subproject wraps are clean-clone bootstrappable
-The wraps committed under `subprojects/` SHALL let `meson subprojects download`
-and `meson setup` succeed on a clean clone with no manual pre-fetching. Only
-top-level **direct**-dependency git wraps (for this project: `frida`,
-`frida-core`, `frida-gum`, `monocypher`) and top-level **override** wraps that
-carry a `patch_directory` or `diff_files` (for this project: `selinux`, and
-`frida-core` itself which carries a `diff_files` patch) SHALL be committed; a
-wrap SHALL NOT be a `[wrap-redirect]` whose target lives inside another,
-not-yet-fetched subproject — transitive dependencies resolve from each
-subproject's own bundled wraps during `meson setup`, and `meson subprojects
-download` regenerates any needed `[wrap-redirect]` files itself. Any
-`patch_directory` referenced by a wrap SHALL be committed under
-`subprojects/packagefiles/<name>/` and SHALL be git-tracked (not excluded by
-`subprojects/.gitignore`). A top-level `subprojects/<name>.wrap` SHALL take
-precedence over the wrap of the same name inside a fetched subproject (e.g.
-`frida-core/subprojects/`), so the project can override a transitive
-subproject's wrap with one carrying a `patch_directory` or `diff_files` (e.g.
-the committed `subprojects/selinux.wrap` overrides frida-core's selinux wrap
-with a `patch_directory = selinux` that fixes libselinux's missing libsepol
-dependency; `subprojects/frida-core.wrap` carries a `diff_files` patch for
-bionic compat).
+### Requirement: Device zone provisioning
 
-`subprojects/.gitignore` SHALL NOT re-allow (`!`) any `[wrap-redirect]` wrap
-that points into a sibling subproject directory. The `.gitignore` SHALL
-re-allow only the wraps the project authors and commits (the direct git wraps
-and the override wraps above). This prevents transitive redirect wraps — which
-`meson subprojects download` regenerates automatically — from being committed
-and breaking the clean-clone bootstrap (meson resolves every redirect eagerly
-before any download, so a redirect whose target is inside a not-yet-fetched
-subproject aborts `meson subprojects download` on a clean clone).
+The device root zone SHALL be `/data/voboost-inject/` (not `/data/voboost`),
+provisioned with the subdirectories the daemon and its consumers require:
+`logs/` (the log sink), `run/` (the kill-switch file location — see
+`device-safety`), `shared/` (the channel-B watched-file directory, labeled
+`media_rw_data_file` via `file_contexts` — see `selinux-domain`,
+`update-planes`), and `payload/` (the native payload files the daemon verifies
+and hands to the injector — see `trust-verification`, `native-payload`). The
+zone and its subdirectories SHALL be owned by root with permissions that allow
+the daemon to read and write. Provisioning SHALL create the directories and
+apply the correct SELinux labels (the `shared/` label is load-bearing: without
+`media_rw_data_file`, the injected process cannot read channel-B files without
+extra SELinux allow rules — see `selinux-domain`).
 
-#### Scenario: No redirect wraps into not-yet-fetched subprojects
-- **WHEN** the committed `subprojects/*.wrap` files are enumerated
-- **THEN** every committed wrap is a `[wrap-git]` direct dependency or override,
-  and none is a `[wrap-redirect]` pointing into a sibling subproject directory
+#### Scenario: Zone is provisioned on the device
 
-#### Scenario: .gitignore does not re-allow transitive redirect wraps
-- **WHEN** `subprojects/.gitignore` is inspected
-- **THEN** it re-allows (`!`) only the direct git wraps (`frida.wrap`,
-  `frida-core.wrap`, `frida-gum.wrap`, `monocypher.wrap`) and the override wrap
-  (`selinux.wrap`), and does NOT re-allow any transitive `[wrap-redirect]` wrap
-  (`libgee.wrap`, `libnice.wrap`, `libpsl.wrap`, `libsoup.wrap`,
-  `quickjs.wrap`, `tinycc.wrap`, `usrsctp.wrap`)
+- **WHEN** the device is provisioned
+- **THEN** `/data/voboost-inject/` exists with `logs/`, `run/`, `shared/`, and
+  `payload/` subdirectories, owned by root
 
-#### Scenario: Wrap patch sources are committed and tracked
-- **WHEN** a wrap declares `patch_directory = <name>` or `diff_files = <patch>`
-- **THEN** the patch directory/file exists under `subprojects/packagefiles/` and is returned by `git ls-files` (tracked, not gitignored)
+#### Scenario: Shared dir is media_rw_data_file
 
-#### Scenario: Top-level wrap overrides a transitive subproject's wrap
-- **WHEN** a top-level `subprojects/<name>.wrap` and a `subprojects/frida-core/subprojects/<name>.wrap` both exist
-- **THEN** meson resolves the top-level one (it searches the root `subprojects/` first), applying its `patch_directory`/`diff_files`
+- **WHEN** the `shared/` directory is provisioned
+- **THEN** it is labeled `media_rw_data_file` via `file_contexts` so the
+  injected process can read channel-B files without extra SELinux allow rules
 
-#### Scenario: Clean clone provisions wraps without error
-- **WHEN** `make init` runs `meson subprojects download` on a clean clone
-- **THEN** the command exits 0, fetching the top-level wraps and applying their committed patches, with no `wrap-redirect … does not exist` and no `patch directory does not exist` error
+### Requirement: Init hook for boot trigger
 
-### Requirement: make init provisions frida's meson for cross-builds
-`make init` SHALL provision frida's meson (the `frida/meson` commit pinned by the
-fetched `frida-core`'s `releng/meson` submodule), alongside the frida-patched
-valac, because the Android cross-build (frida-gum's `quickcompile` `native: true`
-tool) requires a `[provide]` subproject to be built for the build machine — only
-frida's meson does this; standard meson does not. The provisioned frida-meson SHALL
-be the meson used by `make setup` and `make build-android` (so the `coredata.dat`
-is written by the same meson frida-core's `compat/build.py` imports during ninja).
-After checking out the releng submodule, `make init` SHALL apply the committed
-`subprojects/packagefiles/frida-meson-libcpp-hardening-mode.patch` to frida-meson's
-`cpp.py` — frida-meson emits `-D_LIBCPP_ENABLE_ASSERTIONS=1` for clang 15-17, which
-was removed in libc++ (LLVM 18+ / the macOS 26.2 SDK); the patch uses
-`_LIBCPP_HARDENING_MODE` (supported since LLVM 15) unconditionally for clang >= 15.
-`make setup` and `make build-android` SHALL launch frida-meson via `PYTHON_FOR_MESON`
-(default `/usr/bin/python3`), which MUST still ship the stdlib `distutils` module
-(removed in Python 3.12, PEP 0632) — glib's `gdbus-codegen` (a build-machine tool
-run during ninja) imports `distutils.version.LooseVersion`.
+The daemon SHALL be installed as an Android init service triggered
+`on nonencrypted` (with a fallback `on boot`), so it starts before
+`system_server` rises and can reconcile/inject early (see `daemon-lifecycle`).
+The service SHALL be configured `oneshot` + `disabled` as a reboot-loop guard:
+a crashing daemon does not enter an infinite restart loop that would exhaust
+init's restart budget. The self-update restart behavior (init restarting the
+daemon after a clean self-shutdown) is owned by `ota` and is not affected by
+this provisioning-time guard.
 
-#### Scenario: frida-meson is provisioned alongside frida-valac
-- **WHEN** `make init` completes on a clean clone
-- **THEN** frida's meson is available at the pinned `frida/meson` commit, and
-  `make setup`/`make build-android` resolve and use it instead of the system meson
+#### Scenario: Daemon starts on nonencrypted
 
-#### Scenario: frida-meson is patched for libc++ hardening
-- **WHEN** `make init` checks out the `releng/meson` submodule
-- **THEN** it applies `frida-meson-libcpp-hardening-mode.patch` so the build-machine
-  C++ compile does not emit the removed `_LIBCPP_ENABLE_ASSERTIONS` macro
+- **WHEN** the device boots past the `on nonencrypted` trigger
+- **THEN** the daemon service starts before `system_server` rises
 
-#### Scenario: frida-meson runs under a distutils-bearing python
-- **WHEN** `make setup`/`make build-android` launches frida-meson
-- **THEN** it uses `PYTHON_FOR_MESON` (default `/usr/bin/python3`), which ships
-  `distutils` (glib's gdbus-codegen imports `distutils.version`)
+#### Scenario: Crashing daemon does not loop
+
+- **WHEN** the daemon crashes repeatedly on boot
+- **THEN** the `oneshot` + `disabled` configuration prevents an infinite
+  restart loop
 
