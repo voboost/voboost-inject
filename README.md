@@ -2,11 +2,11 @@
 
 **English** | [Русский](README.ru.md)
 
-**voboost-inject** is the root injection component of Voboost: a single native
-Vala binary that embeds [frida-core](https://frida.re) (QuickJS engine, no V8),
-runs as **root**, and injects cryptographically **signed** agents into target
-Android processes — typically `system_server` and other framework processes the
-unprivileged [Voboost app](https://github.com/voboost/voboost) cannot touch.
+**voboost-inject** is the root injection component of Voboost: a Rust daemon
+that drives a ptrace injector and an LSPlant C++ implant, runs as **root**, and
+injects cryptographically **signed** agents into target Android processes —
+typically `system_server` and other framework processes the unprivileged
+[Voboost app](https://github.com/voboost/voboost) cannot touch.
 
 It is launched once at boot by a `/system` init hook and runs as a single
 resident daemon for the whole session. The Voboost app tells it *which* signed
@@ -24,8 +24,9 @@ voboost-inject is one component of a multi-repo system:
   (`ru.voboost`); ships the agents in its APK and writes `inject.json`.
 - **`voboost-inject`** *(this repo)* — the root daemon; verifies and injects
   signed agents.
-- [`voboost-script`](https://github.com/voboost/voboost-script) — the Frida
-  JavaScript agents and the **signed agent-set manifest** they ship in.
+- [`voboost-script`](https://github.com/voboost/voboost-script) — the signed
+  `.dex` agents (LSPlant hooks) and the **signed agent-set manifest** they
+  ship in.
 - [`voboost-install`](https://github.com/voboost/voboost-install) — device
   bring-up: first install of the daemon binary, agents, and the `/system` init
   hook.
@@ -38,9 +39,9 @@ device bring-up lives in
 ## Quick start
 
 ```sh
-make init     # provision toolchain, dev key, and the frida subprojects
-make build    # host release build (release, LTO, frida-core static)
-make test     # host-side tests, device-free
+make init     # provision Rust toolchain + cargo-ndk + NDK r29 verify + dev key
+make build    # host build of the daemon (cargo)
+make test     # host-side Rust tests, device-free
 ```
 
 A device build and first-time install are covered further below.
@@ -51,23 +52,26 @@ A device build and first-time install are covered further below.
   `/system` init hook. Single-instance is enforced with a pidfile guarded by
   `flock` (not by process-name matching); a second instance logs the conflict
   and exits without injecting.
-- **Embedded frida-core.** Drives frida-core in-process over a local device —
-  no socket, no per-injection helper process. frida-core is statically linked
-  into the binary with LTO; there is no separate frida library on disk.
+- **Ptrace injection + LSPlant implant.** The daemon ptrace-attaches to a
+  target, dlopens a small C++ implant (`libimplant.so`), which attaches to ART,
+  initializes LSPlant, and loads the signed `.dex` agent via
+  `InMemoryDexClassLoader`. No socket, no per-injection helper process, no
+  frida — the implant and its Dobby/LSPlant dependencies ship per ABI and are
+  verified by sha256 against the signed release manifest before use.
 - **Signed agents only.** Every agent is verified twice before it runs: the
   agent-set manifest is checked against a public key compiled into the binary
   (ed25519), and each agent file is checked by sha256 against that verified
   manifest. Verification is always on — there is no skip-verify mode.
-- **Earliest injection.** Not-yet-started targets are spawn-gated so the agent
-  loads before the target runs its own code; already-running targets are
-  attached. Non-target processes caught by global spawn-gating are resumed
-  immediately with no attach cost.
-- **Device safety.** A spawn-gated process is always resumed, even if its
-  injection fails (fail-open). Agents are isolated per agent; a failing agent
-  is rate-limited and quarantined, and a mass-death threshold trips a global
-  panic-quarantine that stops all injections. A runtime kill-switch
-  (`/data/voboost/run/disable`) stops everything and idles. (Mechanics and
-  exact thresholds: *Architecture → Device safety*.)
+- **Early injection.** The daemon launches `on nonencrypted` (before
+  `system_server` rises) and ptrace-attaches to targets as soon as they appear
+  in `/proc`, so agents load early in the target's lifetime. There is no
+  spawn-gating — targets are already running when injected.
+- **Device safety.** Agents are isolated per agent; a failing agent is
+  rate-limited and quarantined, a per-target circuit breaker trips on repeated
+  crashes, and a mass-death threshold trips a global panic-quarantine that
+  stops all injections. A runtime kill-switch
+  (`/data/voboost-inject/run/disable`) stops everything and idles. (Mechanics
+  and exact thresholds: *Architecture → Device safety*.)
 - **OTA without a device reboot.** Agents and the daemon binary itself update
   on-device: agents via an atomic manifest swap, the core binary via a
   content-addressed install plus a clean self-shutdown that Android init turns
@@ -78,16 +82,16 @@ A device build and first-time install are covered further below.
 
 The Voboost app ([`voboost`](https://github.com/voboost/voboost), package
 `ru.voboost`) is an ordinary, unprivileged user-space app. It self-distributes
-(not via Play) and ships the Frida agents inside its own APK.
+(not via Play) and ships the signed `.dex` agents inside its own APK.
 The daemon and the app never share a socket — they communicate **only through
 files**, across two strictly separated trust zones on the device:
 
 | Zone | Path | Owner | Who writes |
 |------|------|-------|------------|
-| Root zone (trusted) | `/data/voboost` | root:root, `700` | daemon only |
+| Root zone (trusted) | `/data/voboost-inject` | root:root, `700` | daemon only |
 | App zone (untrusted) | `/data/user/0/ru.voboost` | the app | app; daemon writes status only |
 
-The app **cannot** read, rename, or replace anything in `/data/voboost`. The
+The app **cannot** read, rename, or replace anything in `/data/voboost-inject`. The
 daemon (running as root) can read the app zone, but treats every byte it reads
 there as untrusted and re-verifies it before acting.
 
@@ -165,39 +169,44 @@ On boot the daemon:
 
 1. Acquires an exclusive `flock` on the pidfile (single-instance).
 2. Reads the `startup` field from `inject.json` — `"none"` exits immediately.
-3. Enters VERIFY_SELF: verifies the manifest ed25519 signature against the
-   embedded key, then checks every agent sha256.
-4. On success, enters READY, enables spawn-gating, and begins injecting.
-5. On failure (bad signature, hash mismatch, or frida-core open failure),
-   enters DEGRADED — observe-only, no injections.
+3. Recovers the manifest from `.prev` if the active copy is bad (boot
+   recovery), then enters VERIFY_SELF: verifies the manifest ed25519 signature
+   against the embedded key, then checks every agent sha256.
+4. On success, enters READY; applies any staged inject update (OTA) before the
+   first injection, then begins the poll loop.
+5. On failure (bad signature or hash mismatch), enters DEGRADED — observe-only,
+   no injections. A pending inject switch is rolled back first.
 
 ### Per-target lifecycle
 
 ```
-GATE (spawn-gated) or ATTACH (already running)
-  -> INJECT (JavaScript via a per-process QuickJS session script)
+ATTACH (ptrace an already-running target)
+  -> VERIFY PAYLOAD (sha256 against the verified release manifest)
+  -> INJECT (ptrace dlopen libimplant.so -> ART attach -> LSPlant -> load .dex agent)
   -> MONITOR (watch for death, reinject within safety budget)
 ```
 
-- Every agent runs JavaScript on frida-core's QuickJS runtime via
-  `create_script`, on a per-process session script.
+- The poll loop watches `/proc` for target appearances/deaths every 2 s and
+  ptrace-attaches to new appearances (no spawn-gating — targets are already
+  running when injected).
 - An agent with `boot: true` in the manifest is deferred until
   `sys.boot_completed=1`; other agents inject immediately.
 
 ### Device safety
 
-- **Guaranteed resume.** A spawn-gated process is always resumed, even on
-  injection failure or timeout.
 - **Per-agent isolation.** One agent failing does not affect others or crash
   the target.
 - **Rate-limit + quarantine.** Repeated target deaths for the same
   (agent, process) pair trigger exponential backoff, then quarantine (the
   agent stops injecting; the target runs unmodified).
+- **Per-target circuit breaker.** Repeated crashes of one target (more
+  conservative for `system_server`) mark it degraded and stop injecting it.
 - **Panic-quarantine.** Mass target deaths across the device trip a global
   stop — all injections halt.
-- **Coexistence skip.** If `/proc/PID/maps` shows a foreign Frida agent
-  already present, injection is skipped for that process.
-- **Runtime kill-switch.** The file `/data/voboost/run/disable` or the plan
+- **Coexistence skip.** If `/proc/PID/maps` shows a foreign hooking agent
+  already present (frida, xposed, shadowhook), injection is skipped for that
+  process.
+- **Runtime kill-switch.** The file `/data/voboost-inject/run/disable` or the plan
   flag `disabled` stops all injections and idles the daemon. Deactivating the
   kill-switch requires a daemon restart; injections do not resume
   automatically.
@@ -238,7 +247,7 @@ The device-safety rules above fire at fixed thresholds compiled into the daemon
 - **Trust anchor is compiled in.** The only verification key is baked into the
   binary at build time; the daemon never loads a key from disk, and signature +
   sha256 verification is always on — there is no skip-verify mode.
-- **Defense-in-depth on the root zone.** `/data/voboost` and its whole parent
+- **Defense-in-depth on the root zone.** `/data/voboost-inject` and its whole parent
   chain are root-owned, so the unprivileged app cannot read, rename, or replace
   trusted state. VERIFY_SELF additionally re-checks that the root zone is
   root-owned and not group/world-writable, entering DEGRADED (injects nothing) if
@@ -249,12 +258,13 @@ The device-safety rules above fire at fixed thresholds compiled into the daemon
   file there — `inject-status.json` — is written atomically to a temp opened with
   `O_NOFOLLOW` and renamed into place, so a symlink the app pre-places cannot
   redirect the write at a root-owned file.
-- **ed25519 via Monocypher.** Signature verification is the Monocypher subproject
-  (no system crypto on the device); frida-core is statically linked, so there is
-  no separate frida library to tamper with.
+- **ed25519 via ed25519-dalek.** Signature verification is the `ed25519-dalek`
+  crate (compiled into the daemon); sha256 via the `sha2` crate. The native
+  payload files (no appended signature of their own) are verified by sha256
+  against the signed release manifest.
 - **Minimal attack surface.** The daemon opens no listening socket and runs no
-  per-injection helper process — all frida-core work is in-process over the
-  local device.
+  per-injection helper process — injection is ptrace + an in-process implant
+  (`libimplant.so`), all in-process over the local device.
 
 ## Writing agents
 
@@ -265,10 +275,13 @@ recognizable from the daemon's side. The tooling to assemble the manifest and
 sign it with the matching private key is part of
 [`voboost-script`](https://github.com/voboost/voboost-script).
 
-An agent is JavaScript that runs on frida-core's QuickJS runtime — see
-*Per-target lifecycle* above. It is verified by manifest signature + sha256
-and receives the same opaque `config`. Every shipped agent is JavaScript (see
-[`voboost-script`](https://github.com/voboost/voboost-script)).
+An agent is compiled Java (`.dex`) loaded into the target process via LSPlant
+(see *Per-target lifecycle* above). The implant resolves the agent entry class
+`ru/voboost/agents/AgentEntry` and calls its `init(String configPath)` method
+(see `implant/include/agent_entry_seam.h`). It is verified by manifest
+signature + sha256 and receives its `config` from `inject.json` via the
+channel-B config file. Agent authoring lives in
+[`voboost-script`](https://github.com/voboost/voboost-script).
 
 The agent-set manifest (`manifest.json`, signed into `manifest.sig` and shipped
 inside the app's APK) is an object with a `version`, an optional `daemon`, and
@@ -282,7 +295,7 @@ an `agents` array:
     {
       "id": "wm-viewport",
       "channel": "agents",
-      "file": "agents/wm-viewport.js",
+      "file": "agents/wm-viewport.dex",
       "sha256": "86e413ce702abb872718569c06a2e01c52553ad35953c6df122e007d3146a87a",
       "process": "system_server",
       "boot": false
@@ -297,60 +310,51 @@ booting. The manifest is signed with the private key matching the daemon's
 embedded public key; the daemon verifies the signature, then each agent's
 sha256 against it (see `openspec/specs/trust-verification`).
 
-### Agent (QuickJS)
+### Agent (.dex on LSPlant)
 
-```js
-// agents/wm-viewport.js — runs on the embedded QuickJS engine.
-// The daemon calls rpc.exports.init(stage, parameters) on load,
-// with parameters.config = this agent's "config" from inject.json.
-rpc.exports = {
-  init(stage, parameters) {
-    const { scale } = parameters.config;   // e.g. { "scale": 1.2 }
-    Java.perform(() => {
-      // ...install hooks on a framework class...
-    });
-  }
-};
+```java
+// agents/wm-viewport — compiled to wm-viewport.dex, loaded via
+// InMemoryDexClassLoader. The implant calls AgentEntry.init(configPath),
+// where configPath is the channel-B config file holding this agent's
+// "config" from inject.json.
+package ru.voboost.agents;
+
+public class AgentEntry {
+    public static void init(String configPath) {
+        // read config, install LSPlant hooks on a framework class...
+    }
+}
 ```
 
 ### Agent ↔ daemon messaging
 
-The daemon talks to an agent over frida's `frida:rpc` protocol on top of
-`Script.post`/`message`:
+The daemon delivers each agent's `config` (from `inject.json`) over channel B
+(a per-process JSON config file in the shared dir), and aggregates per-agent
+status back from a per-process agent-status file:
 
-- **daemon → agent:** on load the daemon calls `rpc.exports.init(stage,
-  parameters)` with `parameters.config` set to the agent's `config` from
-  `inject.json` (it posts the `["frida:rpc", …, "call", "init", …]` message
-  itself — you only define the `init` export).
-- **agent → daemon:** `send(payload)` from inside the agent lands on the daemon's
-  `script.message` handler and is written to the root-only log under
-  `agent/<id>`. It is a one-way observe channel — the daemon does not call back
-  beyond `init`.
-
-```js
-rpc.exports = {
-  init(stage, parameters) {
-    const { scale } = parameters.config;
-    send({ event: 'ready', scale });        // agent -> daemon (logged)
-    Java.perform(() => {
-      // ...install hooks on a framework class...
-    });
-  }
-};
-```
+- **daemon → agent:** the daemon writes the per-process config to
+  `/data/voboost-inject/shared/<process>-config.json`; the implant reads it at
+  load and passes the path to `AgentEntry.init`.
+- **agent → daemon:** the agent writes status to
+  `/data/voboost-inject/shared/<process>-agent-status.json`; the daemon
+  aggregates it into `inject-status.json`. (The agent-authoring side of this
+  contract lives in `voboost-script`.)
 
 ## Build
 
+The stack is **Rust** (the daemon, via `cargo` + `cargo-ndk`) and **C/C++**
+(the ptrace injector + LSPlant implant, via NDK `ndk-build`). There is no
+meson, Vala, or frida. The Android NDK r29 is the single cross-build
+prerequisite.
+
 ### Prerequisites
 
-All required tools are installed or built by `make init`:
+All required tools are installed by `make init`:
 
-- Vala compiler (`valac`) — the frida-patched build (version suffix `-frida`)
-- meson (>= 1.1.0), ninja, git
-- openssl (ed25519 keys/signing), bsdiff, uncrustify
-- `io.elementary.vala-lint` — built from a pinned source revision (tag
-  `0.1.0`); there is **no Homebrew/apt package** for it
-- Android NDK — external; set `ANDROID_NDK_HOME` for device builds
+- Rust toolchain (`cargo`/`rustup`), pinned via `rust-toolchain.toml`
+- `cargo-ndk` (Android cross-build), installed by `make init`
+- openssl (ed25519 keys/signing), uncrustify (C/C++ lint), git
+- Android NDK r29 — external; set `ANDROID_NDK_HOME` for device builds
 
 Verify everything is present:
 
@@ -361,33 +365,25 @@ make check
 ### From a fresh clone
 
 ```sh
-make init     # provision the whole environment (OS pkgs, vala-lint, frida valac, dev key, setup)
-make build    # build the daemon binary (host, release, LTO, frida-core static)
-make test     # host-side tests (device-free)
+make init     # provision Rust toolchain + cargo-ndk + NDK r29 verify + dev key
+make build    # host build of the daemon (cargo)
+make test     # host-side Rust tests (device-free)
 ```
 
-`make init` runs three steps in order:
-
-1. **toolchain** — installs OS-package tools, builds `io.elementary.vala-lint`
-   from the pinned source tag, builds the frida-patched `valac` (frida-core
-   requires it), and fetches the pinned frida subproject wraps. Tools install
-   into `.tools/` (project-local, gitignored); the Makefile prepends it to
-   `PATH`.
-2. **key-dev** — generates a local ed25519 dev keypair at
-   `config/key-dev-private.pem` (gitignored) and `config/key-dev-public.pem`
-   (committed), used to bake the public key into the binary.
-3. **setup** — runs `meson setup build`.
+`make init` provisions the Rust toolchain (from `rust-toolchain.toml`),
+installs `cargo-ndk`, verifies NDK r29 is present, and generates the local dev
+keypair at `config/key-dev-private.pem` (gitignored) /
+`config/key-dev-public.pem` (committed, baked into the binary by `build.rs`).
 
 ### Per-OS notes
 
 **macOS (Homebrew)** — `make init` runs
-`brew install vala meson ninja bsdiff uncrustify json-glib glib pkg-config`,
-then builds vala-lint and the frida-patched valac from source.
+`brew install uncrustify openssl@3 curl git`, then installs the Rust toolchain
+via rustup (or relies on an existing one) and `cargo-ndk`.
 
-**Linux (Ubuntu/Debian)** — `make init` runs `apt-get` (via `sudo`) for the
-equivalent packages (incl. `libvala-dev`, `libgee-0.8-dev`,
-`libjson-glib-dev`), then builds vala-lint and the frida-patched valac from
-source.
+**Linux (Ubuntu/Debian)** — `make init` runs `apt-get` (via `sudo`) for
+`build-essential uncrustify openssl curl git pkg-config`, then the Rust
+toolchain and `cargo-ndk`.
 
 **Windows** — use WSL2 + Ubuntu (the Android cross toolchain is Linux-native):
 
@@ -399,55 +395,43 @@ then follow the Linux path inside WSL2.
 
 ### Host vs. device build
 
-Builds are release-only (no debug configuration):
-
 ```sh
-make build          # host build: release, LTO, frida-core static, dynamic host libs (for tests)
-make build-android  # device build: arm64-v8a, frida/glib stack static, bionic dynamic
+make build          # host build: daemon (cargo), for tests
+make build-android  # device build: daemon ELF (cargo-ndk) + native payload (ndk-build)
 ```
 
-`make build` keeps the symbol table (host tests need it); strip is applied at
-install time (`meson install --strip`). The device build is self-contained for
-the frida/glib stack: every bundled subproject (frida-core, glib, gio,
-json-glib, monocypher, ...) is statically linked via the global
-`default_library=static`, so no glib/gio/json-glib is provisioned on the device.
-The bionic system libs (libc, liblog, libz, libm, libdl) link dynamically — NDK
-r29 ships no static bionic, and bionic is always present on Android. The daemon
-is local-backend-only, so `frida-core:connectivity` (TLS/ICE) is disabled.
+`make build-android` needs the Android NDK in `ANDROID_NDK_HOME` (r29). It
+delegates to `make build-new`, which builds:
 
-`make build-android` needs the Android NDK in `ANDROID_NDK_HOME`; the NDK
-toolchain PATH is derived automatically from it (no manual PATH setup). CI pins
-NDK **r29** — frida-core 17.11.0's releng requires exactly major version 29
-(`NDK_REQUIRED=29`); r27/r27d are rejected. Use the same locally for
-reproducible device builds.
+- the native artifacts: the injector (`libinjector.a`, C, arm64-v8a) and the
+  implant (`libimplant.so`, C++, arm64-v8a + armeabi-v7a) via `ndk-build`;
+- the daemon ELF via `cargo ndk -t arm64-v8a build --release`.
 
-Both `make setup` and `make build-android` configure via frida's own meson fork
-(provisioned by `make init` from `frida-core`'s `releng/meson` submodule), not
-the system meson — frida-gum's `quickcompile` (`native: true`) needs its QuickJS
-subproject built for the build machine, which only frida's meson does. frida-meson
-is launched via `PYTHON_FOR_MESON` (default `/usr/bin/python3`), which must ship
-the stdlib `distutils` module (removed in Python 3.12) — glib's `gdbus-codegen`
-imports it.
+CI pins NDK **r29** — LSPlant's C++23 modules fail on r27. Use the same locally
+for reproducible device builds. LTO is disabled for the native artifacts
+(LSPlant C++23 modules); the daemon uses `lto = false` too.
 
 ### Lint and test
 
 ```sh
-make lint      # io.elementary.vala-lint + uncrustify --check (gate)
-make lint-fix  # uncrustify --replace (canonical style in place)
-make test      # meson test (host-side, silent on success)
+make lint      # cargo fmt --check + cargo clippy (deny warnings) + uncrustify --check (gate)
+make lint-fix  # cargo fmt + uncrustify --replace (canonical style in place)
+make test      # cargo test (host-side, silent on success)
 ```
 
-`make lint` first checks that both linters are on `PATH`; if either is missing
-it tells you to run `make init` instead of failing with `command not found`.
+`make lint` lints Rust (`cargo clippy` + `cargo fmt --check`) and C/C++
+(`uncrustify --check` over `injector/` and `implant/`). `make test` runs the
+Rust test suite on the host (the FFI extern blocks to the injector are not
+linked under `check`/`test`, so pure-Rust tests run without the NDK).
 
 ## Install / deploy
 
 ### Device layout
 
-On a provisioned device the daemon owns the root zone `/data/voboost`:
+On a provisioned device the daemon owns the root zone `/data/voboost-inject`:
 
 ```
-/data/voboost/
+/data/voboost-inject/
   voboost-inject                stable launch path the init hook execs
   voboost-inject.prev           previous core binary, kept for OTA rollback
   manifest.json + manifest.sig  active signed agent-set manifest
@@ -464,7 +448,7 @@ The app zone `/data/user/0/ru.voboost/` holds `inject.json`,
 ### Initial provisioning
 
 End-to-end device bring-up — placing the verified binary at
-`/data/voboost/voboost-inject`, laying down the agents and signed manifest, and
+`/data/voboost-inject/voboost-inject`, laying down the agents and signed manifest, and
 installing the `/system` init hook — lives in
 [`voboost-install`](https://github.com/voboost/voboost-install). This repo only
 defines the contract the provisioned device must satisfy: the init hook execs
@@ -502,7 +486,7 @@ keypair — rotate before a real release.
 ### After a system OTA
 
 A system OTA reverts only `/system`, so the init hook is lost while
-`/data/voboost`, the daemon, and all agents survive. An operator restores the
+`/data/voboost-inject`, the daemon, and all agents survive. An operator restores the
 hook over `adb` (idempotent — a hook that already contains the block is left
 untouched):
 
@@ -515,14 +499,14 @@ system OTA cadence.
 
 ## Logging
 
-The daemon logs to `/data/voboost/logs/inject-YYYY-MM-DD.log` (mode `600`,
+The daemon logs to `/data/voboost-inject/logs/inject-YYYY-MM-DD.log` (mode `600`,
 root-only) and retains logs for **7 days**. Each line follows the shared format
 `yyyy-MM-dd HH:mm:ss.SSS [tag] src: msg`, where the tag is `[*]` (info), `[+]`
 (ok), or `[-]` (error). Example:
 
 ```
 2026-06-26 07:52:13.042 [*] main: SIGTERM: clean shutdown
-2026-06-26 07:52:14.101 [+] frida: injected wm-viewport
+2026-06-26 07:52:14.101 [+] injector: injected pid=1234
 ```
 
 The log stays in the root zone — the app cannot read it, and the daemon never
@@ -538,23 +522,24 @@ and control the daemon directly:
 adb shell cat /data/user/0/ru.voboost/inject-status.json
 
 # Today's daemon log (root zone):
-adb shell cat /data/voboost/logs/inject-$(date +%F).log
+adb shell cat /data/voboost-inject/logs/inject-$(date +%F).log
 
 # Stop all injections now (runtime kill-switch); gated processes resume:
-adb shell touch /data/voboost/run/disable
+adb shell touch /data/voboost-inject/run/disable
 
 # Resume: remove the kill-switch, then relaunch the daemon — injections do NOT
 # resume on their own, a restart is required:
-adb shell rm /data/voboost/run/disable
+adb shell rm /data/voboost-inject/run/disable
 #   then restart the init service (or reboot) to relaunch the daemon
 ```
 
-- `"state": "degraded"` in `inject-status.json` means VERIFY_SELF or the
-  frida-core open failed — the daemon is observe-only until restarted.
+- `"state": "degraded"` in `inject-status.json` means VERIFY_SELF failed
+  (manifest signature or agent sha256 mismatch) — the daemon is observe-only
+  until restarted.
 - `"panic": true` means the global panic-quarantine tripped; it clears only on a
   daemon restart.
 - A single instance is enforced via `flock` on
-  `/data/voboost/run/inject.pid`; a second launch logs the conflict and exits.
+  `/data/voboost-inject/run/inject.pid`; a second launch logs the conflict and exits.
 
 ## CI
 
@@ -573,57 +558,63 @@ Triggered by a `v*` tag:
 
 1. `make init` — provision (cached)
 2. **Version gate** — fails if the tag does not match `v$version` from
-   `meson.build`
+   `Cargo.toml`
 3. `make lint` + `make test` — quality gates re-run (a tag cannot bypass them)
 4. Android NDK setup (`r29`, SHA-pinned action)
-5. `make build-android` — arm64-v8a, fully static
-6. `llvm-strip` the device binary
-7. `make release-manifest` — generates `build/release-manifest.json`
-8. `make sign` + `make verify-sig` — signs with the CI secret `SIGNING_KEY`
-9. Publishes `voboost-inject`, `release-manifest.json`, and `.sig` as workflow
-   artifacts
+5. `make build-android` — daemon ELF (cargo-ndk, arm64-v8a) + native payload
+   (ndk-build, LTO disabled)
+6. `llvm-strip` the daemon ELF; `make sign-elf` builds the signed inject payload
+7. Stage the inject payload + per-ABI payload files
+8. `make release-manifest` — generates `build/release-manifest.json`
+9. `make sign` + `make verify-sig` — signs with the CI secret `SIGNING_KEY`
+10. Publishes the inject payload, per-ABI payload, `release-manifest.json`,
+    and `.sig` as workflow artifacts
 
 ## Versioning
 
-The version lives in `meson.build` `project(version: ...)` (single source of
-truth, baseline `1.0.0-beta1`). CI consumes it and never defines it elsewhere.
-Bump the pre-release postfix before each release tag, then push the matching
-tag; the release workflow validates `v$version == $tag` and fails if they
-diverge.
+The version lives in `Cargo.toml` `[package].version` (single source of truth,
+baseline `1.0.0-beta1`). CI consumes it and never defines it elsewhere. Bump
+the pre-release postfix before each release tag, then push the matching tag;
+the release workflow validates `v$version == $tag` and fails if they diverge.
 
     1.0.0-beta1 -> 1.0.0-beta2 -> ... -> 1.0.0-rc1 -> 1.0.0
 
 ## Project layout
 
 ```
-src/            Vala daemon source (modules + VAPI bindings)
+daemon/         Rust daemon source (poll loop, trust, safety, OTA, status)
+injector/       C ptrace injector (ndk-build -> libinjector.a)
+implant/        C++ LSPlant implant (ndk-build -> libimplant.so per ABI)
+prebuilt/       libdobby.a, liblsplant.so, liblsplt.so per ABI (NDK r29)
+selinux/        voboost-inject.te + file_contexts (ptrace allow rules)
+config/         Build configs (uncrustify), init .rc, dev/release keys
 test/           Host-side unit tests + fixtures + integration test plan
-config/         Build configs (uncrustify, vala-lint, cross-file, dev/release keys)
 openspec/specs/ Behavioral specifications (source of truth)
-subprojects/    Pinned frida git wraps (fetched by make init)
-.tools/         Built tools (frida-patched valac, vala-lint; gitignored)
 ```
 
-Frida is provisioned from pinned git wraps in `subprojects/` (frida,
-frida-core, frida-gum, all pinned to tag `17.11.0`), fetched and cached on
-`make init`; there is no hardcoded local frida source path.
+The native payload toolchain is NDK r29 (Clang 21) for all C/C++ artifacts;
+LSPlant's C++23 modules fail on older NDKs. The prebuilt Dobby/LSPlant/lsplt
+libraries are built from source with NDK r29 (see `prebuilt/README.md`).
 
 ## Source modules
 
 | File | Purpose |
 |------|---------|
-| `main.vala` | Entry point: single-instance lock, startup gate, GMainLoop, SIGTERM |
-| `supervisor.vala` | State machine (INIT→VERIFY_SELF→READY/DEGRADED), injection orchestration |
-| `frida_controller.vala` | In-process frida-core driving: spawn-gating, attach, inject, resume |
-| `manifest.vala` | Verified manifest parser (ed25519 sig + JSON; agent id/process) |
-| `plan_reader.vala` | Untrusted `inject.json` parser, validated against the manifest |
-| `trust_store.vala` | Ed25519 signature verify (Monocypher), sha256 agent verify |
-| `safety.vala` | Rate-limit, quarantine, panic-quarantine, coexistence skip, kill-switch |
-| `status.vala` | Atomic `inject-status.json` writer (temp + rename, no symlink follow) |
-| `ota.vala` | OTA apply/rollback: agent manifest swap, core install + self-shutdown |
-| `app_zone_watcher.vala` | GFileMonitor on `inject.json` and `staging/core-update-ready` |
-| `process_watcher.vala` | Event-driven target tracking via frida spawn/death signals |
-| `log.vala` | Root-only daily log, 7-day retention, shared format |
+| `daemon/src/main.rs` | Entry point: single-instance lock, startup gate, VERIFY_SELF, OTA apply, SIGTERM, poll loop |
+| `daemon/src/injector.rs` | FFI to the C injector (`vbi_inject`): ptrace attach → dlopen `libimplant.so` |
+| `daemon/src/manifest.rs` | Verified agent-manifest parser (ed25519 sig + JSON; agent id/process) |
+| `daemon/src/release_manifest.rs` | Signed release-manifest parser (native payload sha256 + per-ABI `abi` coverage) |
+| `daemon/src/plan.rs` | Untrusted `inject.json` parser, validated against the manifest |
+| `daemon/src/trust.rs` | Ed25519 signature verify (ed25519-dalek), sha256 agent/payload verify |
+| `daemon/src/safety.rs` | Rate-limit, circuit breaker, panic-quarantine, coexistence skip, kill-switch |
+| `daemon/src/reconcile.rs` | Maps marker (already injected?), foreign-footprint skip, bitness detect |
+| `daemon/src/process_watcher.rs` | `/proc` polling: find target pids, track appearances/deaths |
+| `daemon/src/ota.rs` | Atomic apply/rollback + inject self-update (ELF + payload swap, `.prev` rollback) |
+| `daemon/src/status.rs` | Atomic `inject-status.json` writer (temp + rename, no symlink follow) |
+| `daemon/src/control_plane.rs` | Channel B: per-process config delivery + agent-status aggregation |
+| `daemon/src/boot.rs` | Boot-state gate (`sys.boot_completed`), env-var escape hatch |
+| `injector/*.c` | C ptrace injector → `libinjector.a` (attach, remote_call64/32, `__loader_dlopen`) |
+| `implant/*.cpp` | C++ LSPlant implant → `libimplant.so` (ART attach, hidden-API exempt, dex load) |
 
 ## License
 

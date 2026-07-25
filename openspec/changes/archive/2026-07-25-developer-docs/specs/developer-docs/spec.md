@@ -14,11 +14,12 @@ per-OS notes (macOS, Linux, Windows/WSL2).
 - **THEN** they run `make init` to provision the Rust toolchain and verify NDK
   r29, and can then run `make build` to produce a binary
 
-#### Scenario: README addresses the NDK prerequisite
+#### Scenario: README addresses the vala-lint gap
 
 - **WHEN** a developer reaches the build prerequisites in the README
 - **THEN** it states that NDK r29 must be installed and `ANDROID_NDK_HOME` set,
-  and that `make init` verifies it
+  and that `make init` verifies it (no vala-lint build — the Vala stack is
+  gone; the Rust toolchain + cargo-ndk are provisioned instead)
 
 ### Requirement: Token-economical AGENTS.md
 
