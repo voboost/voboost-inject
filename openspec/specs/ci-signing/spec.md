@@ -3,18 +3,24 @@
 ## Purpose
 Specify release-time signing of the OTA release manifest with the ed25519 key from CI secrets:
 private-key hygiene, committed-public-key verification, and no signing on non-release builds.
-
 ## Requirements
 ### Requirement: Real release build on release/tag
-On a release/tag, CI SHALL cross-build the `inject` daemon target for Android (`make build-android`,
-arm64-v8a, fully static, LTO) and strip it for the release artifact: the published device binary is
-stripped (`llvm-strip`), since `make build-android` leaves symbols in and strip is install-time per
-`inject/build-and-signing`. This happens before signing.
+
+On a release/tag, CI SHALL cross-build the `inject` daemon target for Android
+(`make build-android`: the daemon via `cargo-ndk` targeting
+`aarch64-linux-android`, and the native artifacts via NDK r29
+`ndk-build`/CMake — see `build-and-signing`) and strip the daemon ELF for the
+release artifact: the published device binary is stripped (`llvm-strip`),
+since `make build-android` leaves symbols in and strip is install-time. The
+native artifacts SHALL be built without LTO (see `build-and-signing`). This
+happens before signing.
 
 #### Scenario: Release tag triggers the build
+
 - **WHEN** a release/tag build runs
-- **THEN** CI builds the daemon target with the release configuration (static, LTO) and strips it for
-  the published artifact
+- **THEN** CI builds the daemon via `cargo-ndk` (aarch64) and the native
+  artifacts via NDK r29 `ndk-build`/CMake, without LTO, and strips the daemon
+  ELF for the published artifact
 
 ### Requirement: Release signing from CI secrets
 On a release/tag build, CI SHALL sign the OTA release manifest (`build/release-manifest.json`,

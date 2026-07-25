@@ -17,30 +17,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache make init result
+      - name: Cache Cargo registry + target
         uses: actions/cache@v4
         with:
           path: |
-            .tools
-            subprojects
-          key: init-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'Makefile') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            daemon/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'daemon/Cargo.toml') }}
 
       - name: Provision (make init)
         run: make init
 
-      # CI gate (ci-versioning): meson.build is the single source of truth. Fail
-      # fast — before the expensive NDK setup and Android cross-build — if the
-      # tag does not match v$version. No signing or publishing happens on a
-      # mismatch.
+      # CI gate (ci-versioning): Cargo.toml [package].version is the single
+      # source of truth (baseline 1.0.0-beta1). Fail fast — before the NDK
+      # setup and cross-build — if the tag does not match v$version. No signing
+      # or publishing happens on a mismatch.
       - name: Validate version
         run: |
-          version=$(meson introspect build --projectinfo \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"(.*)"/\1/')
           tag="${GITHUB_REF_NAME}"
-          echo "meson.build version: $version"
+          echo "Cargo.toml version: $version"
           echo "tag: $tag"
           test "v$version" = "$tag" || {
-            echo "tag $tag does not match meson.build version v$version" >&2
+            echo "tag $tag does not match Cargo.toml version v$version" >&2
             exit 1
           }
 
@@ -53,32 +53,21 @@ jobs:
       - name: Test
         run: make test
 
-      # Android NDK for the arm64-v8a cross-build. make init does not provision
-      # it (external prerequisite); pin the LTS release for reproducible builds.
-      #
-      # nttld/setup-ndk downloads the NDK, adds its ROOT to PATH, and exposes the
-      # install path as the `ndk-path` output — but it does NOT put the
-      # cross-toolchain bin (where aarch64-linux-android-clang and llvm-strip
-      # live) on PATH, nor set ANDROID_NDK_HOME/ROOT (the action's own README has
-      # the consumer do that). The next step does both, so the bare tool names in
-      # config/android-cross.ini and the llvm-strip step resolve.
+      # Android NDK r29 for the native artifacts (ndk-build) and the daemon
+      # cross-build (cargo-ndk). make init verifies its presence locally; CI
+      # provisions it here. r29 is required (LSPlant C++23 modules fail on r27).
       #
       # SHA-pinned (not @v1): this third-party action runs in the workflow that
-      # handles SIGNING_KEY, so its supply chain is pinned to an immutable
-      # commit. First-party actions/*@v4 follow the project convention. ndk-version
-      # pins the NDK to r29 — frida-core 17.11.0's releng requires exactly r29
-      # (releng/env_android.py NDK_REQUIRED=29, used by the embedded-agent build);
-      # r27/r27d are rejected with NdkVersionError.
+      # handles SIGNING_KEY, so its supply chain is pinned to an immutable commit.
       - name: Set up Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
         with:
           ndk-version: r29
 
-      # Expose the NDK to the cross-build: ANDROID_NDK_HOME/ROOT for tooling that
-      # reads it, and the LLVM prebuilt bin on $GITHUB_PATH so the cross-compiler
-      # and llvm-strip named in config/android-cross.ini resolve in later steps.
-      # linux-x86_64 matches the ubuntu-latest runner.
+      # Expose the NDK to the cross-build: ANDROID_NDK_HOME/ROOT for tooling,
+      # and the LLVM prebuilt bin on $GITHUB_PATH so the cross-compiler and
+      # llvm-strip resolve in later steps (ci-signing task 1.3).
       - name: Put NDK toolchain on PATH
         run: |
           ndk="${{ steps.setup-ndk.outputs.ndk-path }}"
@@ -86,23 +75,23 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
           echo "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      # Release-only cross-build for the device (arm64-v8a, fully static).
-      - name: Build device binary (release-only, arm64)
+      # Cross-build the full new stack: native artifacts (injector
+      # libinjector.a + implant libimplant.so per ABI via ndk-build, LTO
+      # disabled — ci-signing task 1.2) and the daemon ELF via cargo-ndk
+      # (aarch64-linux-android). No meson, no frida (ci-signing task 1.1).
+      - name: Build device artifacts (arm64 + native payload)
         run: make build-android
 
-      # Strip the device binary for the published release artifact. meson's
-      # `strip` option (config/android-cross.ini) applies at install time, not
-      # during `ninja`, so `make build-android` leaves the symbol table in; the
-      # release artifact is the stripped ("installed") binary (build-and-signing).
-      # llvm-strip is on PATH from setup-ndk — the same tool the cross-file names.
-      - name: Strip device binary
-        run: llvm-strip build-android/voboost-inject
+      # Strip the daemon ELF for the published artifact. cargo-ndk's release
+      # build leaves the symbol table in; the release artifact is stripped.
+      # llvm-strip is on PATH from setup-ndk.
+      - name: Strip daemon ELF
+        run: llvm-strip daemon/target/aarch64-linux-android/release/voboost-inject
 
       # Build the signed inject payload: the stripped daemon ELF carrying an
       # appended ed25519 signature in trailing bytes (VOBSIG1 magic + LE uint64
-      # SIG_OFFSET + 64-byte sig over the ELF). The daemon's
-      # apply_inject_update() reads the trailing block and re-verifies the
-      # signature against EMBEDDED_PUBKEY; the ELF itself is installed.
+      # SIG_OFFSET + 64-byte sig over the ELF). The daemon's apply_inject_update
+      # reads the trailing block and re-verifies against EMBEDDED_PUBKEY.
       - name: Build signed inject payload
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
@@ -115,35 +104,41 @@ jobs:
           keyfile=$(mktemp)
           trap 'rm -f "$keyfile"' EXIT
           printf '%s' "$SIGNING_KEY" > "$keyfile"
-          make sign-elf BINARY=build-android/voboost-inject KEY="$keyfile" OUT=build/voboost-inject
+          make sign-elf \
+            BINARY=daemon/target/aarch64-linux-android/release/voboost-inject \
+            KEY="$keyfile" OUT=build/voboost-inject
           rm -f "$keyfile"
 
-      # Stage only the intended release artifact(s) into a clean directory so
-      # the manifest generator (ota) scans release files, not meson build noise
-      # (build.ninja, meson-info/, object files, subproject artefacts). The
-      # signed inject payload (not the raw binary) is the inject channel.
+      # Stage the release artifacts into a clean directory (ci-release): the
+      # signed inject payload (daemon ELF) AND the per-ABI native payload files
+      # (libimplant.so, liblsplant.so, liblsplt.so, libdobby.a). The raw build
+      # objects (daemon/target, implant/libs) are intermediates, not published.
       - name: Stage release artifacts
         run: |
-          mkdir -p dist
+          mkdir -p dist/payload/arm64-v8a dist/payload/armeabi-v7a
           cp build/voboost-inject dist/
+          # Per-ABI payload files built by make build-implant (implant/libs).
+          for abi in arm64-v8a armeabi-v7a; do
+            for f in libimplant.so liblsplant.so liblsplt.so libdobby.a; do
+              src="implant/libs/$abi/$f"
+              [ -f "$src" ] || src="prebuilt/$abi/$f"
+              cp "$src" "dist/payload/$abi/$f"
+            done
+          done
 
-      # Generate the OTA release manifest (owned by the ota change) from the
-      # clean staging dir; ci signs and publishes it below. The version was
-      # validated up front; re-read it here (each step is a fresh shell).
+      # Generate the OTA release manifest from the clean staging dir; ci signs
+      # and publishes it below. The version was validated up front; re-read it
+      # here (each step is a fresh shell).
       - name: Generate release manifest
         run: |
-          version=$(meson introspect build --projectinfo \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
-          # make release-manifest (ota) scans the clean staging dir (DIR) and
-          # writes build/release-manifest.json (per-file sha256/size/version),
-          # labelling every file with the given channel.
+          version=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"(.*)"/\1/')
           make release-manifest DIR=dist CHANNEL=inject VERSION="$version"
 
       # Sign the OTA release manifest with the ed25519 private key from CI
-      # secrets. Signing the manifest transitively authenticates every listed
-      # file via its in-manifest sha256 (the ota trust model). The private key is
-      # written to a temp file (umask 077); the trap removes it even on failure.
-      # Never echoed. Non-release builds never reach this step.
+      # secrets (ci-signing task 2.1). Signing the manifest transitively
+      # authenticates every listed file via its in-manifest sha256. The private
+      # key is written to a temp file (umask 077); the trap removes it even on
+      # failure. Never echoed. Non-release builds never reach this step.
       - name: Sign and verify release manifest
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
@@ -160,18 +155,17 @@ jobs:
           make verify-sig KEY=config/release-public.pem FILE=build/release-manifest.json
           rm -f "$keyfile"
 
-      # Publish the signed inject payload (the daemon ELF with its appended
-      # ed25519 signature) and the signed OTA release manifest (with its .sig).
-      # The signed inject payload is the atomic update unit the OTA client
-      # downloads and stages; the release manifest is its trust source
-      # (size+sha256). The raw device binary is not published — it is the
-      # signed inject payload.
+      # Publish the signed inject payload (daemon ELF), the per-ABI payload
+      # files, the signed OTA release manifest, and its .sig (ci-release). The
+      # raw build objects are not published. if-no-files-found: error ensures
+      # nothing is published if any earlier step failed to produce its output.
       - name: Publish signed artifacts
         uses: actions/upload-artifact@v4
         with:
           name: voboost-inject-${{ github.ref_name }}
           path: |
             build/voboost-inject
+            dist/payload/
             build/release-manifest.json
             build/release-manifest.json.sig
           if-no-files-found: error

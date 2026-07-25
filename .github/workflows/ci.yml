@@ -19,23 +19,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Cache the whole `make init` result: the project-local tools prefix
-      # (.tools/, holding the source-built vala-lint and the frida-patched
-      # valac) and the fetched frida checkout (subprojects/). Keyed on the
-      # pinned frida revisions (wrap files) and the vala-lint pin (Makefile,
-      # VALA_LINT_REV); changing either pin invalidates the cache.
-      - name: Cache make init result
+      # Cache the new toolchain's provisioned state: the Cargo registry/index
+      # and the built target/ prefix. Keyed on rust-toolchain.toml + Cargo.lock
+      # (ci-pipeline: cache keyed on the new pins, not frida wraps).
+      - name: Cache Cargo registry + target
         uses: actions/cache@v4
         with:
           path: |
-            .tools
-            subprojects
-          key: init-${{ runner.os }}-${{ hashFiles('subprojects/*.wrap', 'Makefile') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            daemon/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'daemon/Cargo.toml') }}
 
-      # Provision exactly like a developer. `make init` installs the OS
-      # packages, builds vala-lint and the frida-patched valac, fetches the
-      # frida wraps, generates the dev keypair, and runs meson setup. The
-      # Makefile prepends .tools/bin to PATH for its own recipes.
+      # Provision exactly like a developer. make init installs the OS packages,
+      # the Rust toolchain (from rust-toolchain.toml), cargo-ndk, verifies NDK
+      # r29, and generates the dev keypair. No frida/meson/vala.
       - name: Provision (make init)
         run: make init
 
@@ -45,8 +43,7 @@ jobs:
       - name: Test
         run: make test
 
-      # Release-only host build for validation (release, LTO; dynamically
-      # linked, unstripped). The fully-static device (arm64) build runs only
-      # in the release workflow.
-      - name: Build (release-only, host)
+      # Validation host build (cargo) for the new stack. The device (arm64)
+      # cross-build runs only in the release workflow.
+      - name: Build (host)
         run: make build
