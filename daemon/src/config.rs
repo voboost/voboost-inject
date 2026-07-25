@@ -46,6 +46,40 @@ pub fn libimplant_path(abi: &str) -> String {
     format!("{PAYLOAD_DIR}/{abi}/libimplant.so")
 }
 
+/// The untrusted app-zone staging directory where the OTA client stages a
+/// verified inject update (daemon ELF + per-ABI payload) before the daemon
+/// applies it.
+pub fn staging_dir() -> String {
+    format!("{APP_ZONE}/staging")
+}
+
+/// The stable launch path init execs (root zone). The inject self-update never
+/// replaces this in place; it repoints via an atomic rename (ota spec).
+pub fn inject_binary_file() -> String {
+    format!("{ROOT_ZONE}/voboost-inject")
+}
+
+/// The previous daemon binary, kept one-deep for rollback (ota spec).
+pub fn inject_prev_file() -> String {
+    format!("{ROOT_ZONE}/voboost-inject.prev")
+}
+
+/// The switch-pending marker, written after an inject self-replace so a
+/// DEGRADED restart can roll back (atomic-apply-rollback / ota spec).
+pub fn inject_switch_pending_marker() -> String {
+    format!("{RUN_DIR}/voboost-inject-switch-pending")
+}
+
+/// The producer's "a verified inject update is staged" marker (single-use,
+/// created last in the staging dir). Owned by the daemon as the consumer.
+pub fn inject_update_ready_marker(staging: &str) -> String {
+    format!("{staging}/voboost-inject-update-ready")
+}
+
+/// DoS bound for the staged inject payload (a single appended-sig ELF).
+/// 64 MiB is a generous upper bound (a typical daemon ELF is tens of MB).
+pub const MAX_INJECT_BYTES: usize = 67_108_864;
+
 /// Path to the root-zone manifest.
 pub fn manifest_file() -> String {
     format!("{ROOT_ZONE}/manifest.json")

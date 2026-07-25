@@ -19,9 +19,10 @@ restarts the new binary. Because the injected code outlives the daemon (see
 new daemon reconciles existing injections by the `libimplant.so` maps marker
 (see `injection-control`).
 
-#### Scenario: App stages the daemon ELF and payload
+#### Scenario: App stages the daemon APK
 
 - **WHEN** the OTA client has downloaded and verified a newer inject update
+  (daemon ELF + per-ABI payload files)
 - **THEN** it stages the daemon ELF and all per-ABI payload files into the
   app-zone `staging/` directory and creates `voboost-inject-update-ready` as
   the last atomic step, and does not install the daemon
@@ -123,7 +124,7 @@ integrity is established by the release manifest (see `release-manifest`),
 not by an appended signature. There is no ZIP container and no embedded
 per-agent manifest in the ELF payload.
 
-#### Scenario: Staged inject ELF naming
+#### Scenario: Staged inject file naming
 
 - **WHEN** the OTA client has downloaded and verified a newer daemon ELF
 - **THEN** it stages the file named `voboost-inject` (no `.apk` extension) into

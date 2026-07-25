@@ -53,12 +53,59 @@ fn main() {
         Some(m) => m,
         None => {
             log::err("main", "DEGRADED: self-verification failed");
+            // Degraded-restart rollback: if a switch-pending marker is present
+            // (a self-replace was committed but this restart is DEGRADED), roll
+            // back to the previous ELF + payload and self-shut down so init
+            // restarts the previous binary (ota "Degraded restart rolls back").
+            if ota::inject_switch_pending() {
+                log::info("main", "switch-pending: rolling back inject switch");
+                if ota::rollback_inject_switch() {
+                    release_lock();
+                    std::process::exit(0);
+                }
+                log::err("main", "rollback failed; staying DEGRADED");
+            }
             write_degraded_status();
             run_degraded_loop();
             return;
         }
     };
     log::ok("main", &format!("READY ({} agents)", manifest.agents.len()));
+
+    // Ready-restart confirm: a switch-pending marker present at a READY restart
+    // means the new ELF launched successfully — confirm the switch (clear the
+    // marker, drop the .prev rollback targets). ota "Ready restart confirms".
+    if ota::inject_switch_pending() {
+        log::ok("main", "switch confirmed (ready restart)");
+        ota::confirm_inject_switch();
+    }
+
+    // Apply a staged inject update after VERIFY_SELF and before the first
+    // injection, so the first injection uses the new ELF + payload (ota spec).
+    let staging = config::staging_dir();
+    if ota::inject_update_ready(&staging) {
+        log::info("main", "staged inject update ready; applying");
+        // Load the verified release manifest: it is the authority for the
+        // payload files' sha256 (re-verified inside apply_inject_update).
+        let rm = release_manifest::ReleaseManifest::load();
+        match ota::apply_inject_update(&staging, rm.as_ref()) {
+            ota::InjectApplyOutcome::Applied => {
+                log::ok("main", "inject update applied; self-shutdown for restart");
+                release_lock();
+                std::process::exit(0);
+            }
+            outcome => {
+                log::err(
+                    "main",
+                    &format!(
+                        "inject update rejected ({:?}); \
+                         continuing with current ELF + payload",
+                        outcome
+                    ),
+                );
+            }
+        }
+    }
 
     // --- Run the daemon loop ---
     run_daemon(manifest);
