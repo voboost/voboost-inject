@@ -9,7 +9,7 @@
  *     with /proc/<pid>/maps /lib64/ scan fallback
  *   - remote call via PTRACE_CONT + LR=0 trap (SINGLESTEP/hw-bp do NOT work
  *     on this kernel — AndKittyInjector rejected for that reason)
- *   - cross-bitness regsets: arm64_regs (64) / user_regs (32, Thumb bit)
+ *   - cross-bitness regsets: arm64_regs (64) / user_regs_32 (32, Thumb via CPSR.T)
  *   - __loader_dlopen (NOT libdl dlopen, which loses arguments)
  *   - caller_addr inside app_process for namespace resolution
  *   - .so path written ~8KB below SP (closer is clobbered by call frame)
@@ -33,6 +33,20 @@
 #include <android/log.h>
 
 #include "injector.h"
+
+/* Verbose step-by-step debug logging for the injector (attach, bitness,
+ * dlopen, dlsym, init, every remote_call32/64 register set). Off in
+ * production — the daemon's own log file is the canonical trace; the only
+ * logcat output in production is the ERROR-level dlerror string when a remote
+ * dlopen fails (see vbi_inject). Flip to 1 to diagnose injection failures
+ * on-device. */
+#define VBI_DBG 0
+#if VBI_DBG
+#define DBG(fmt, ...) \
+        __android_log_print(ANDROID_LOG_INFO, "voboost-injector", "DBG: " fmt, ## __VA_ARGS__)
+#else
+#define DBG(fmt, ...) ((void)0)
+#endif
 
 /* ---- internal types from regs.c ---- */
 
@@ -169,10 +183,21 @@ static u64 remote_call64(int pid, u64 func_addr, u64 args[], int nargs) {
  *   uregs[0]  = r0 (return value)
  *   uregs[13] = sp
  *   uregs[14] = lr
- *   uregs[15] = pc (Thumb bit: bit 0 set if Thumb mode)
+ *   uregs[15] = pc
+ *   uregs[16] = cpsr (bit 5 = 0x20 = CPSR.T → Thumb decoding; see remote_call32)
+ * NOTE: Thumb mode is NOT selected by the PC LSB under ptrace (the kernel
+ * writes back an even PC). Set CPSR.T in uregs[16] when calling a Thumb
+ * symbol (linker hands back LSB=1 addresses for Thumb); see remote_call32.
  */
 struct user_regs_32 {
-    unsigned long uregs[18];
+    /* 32-bit ARM regset fields are 32-bit wide. The kernel's
+     * PTRACE_GETREGSET for a 32-bit ARM target returns iov_len=72
+     * (18 * sizeof(uint32_t)). Using `unsigned long` here (8 bytes on a
+     * 64-bit host/toolchain) makes sizeof(user_regs_32)=144, so the kernel
+     * fills only the first 72 bytes and every other field reads as 0 or as a
+     * misaligned concatenation of two adjacent 32-bit values (observed:
+     * uregs[13]=0x269000020 was actually SP_low|SP_high of two slots). */
+    uint32_t uregs[18];
 };
 
 static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
@@ -180,42 +205,64 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
     struct iovec iov = { &regs, sizeof(regs) };
 
     if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0) {
+        DBG("rc32: GETREGSET failed: %s", strerror(errno));
         return 0;
     }
 
     struct user_regs_32 orig = regs;
+    DBG("rc32: func=0x%llx nargs=%d orig pc=0x%x sp=0x%x",
+        (unsigned long long)func_addr, nargs, orig.uregs[15], orig.uregs[13]);
 
     /* Set arguments r0..r3 (ARM calling convention: first 4 in registers) */
     for (int i = 0; i < nargs && i < 4; i++) {
-        regs.uregs[i] = (unsigned long)args[i];
+        regs.uregs[i] = (uint32_t)args[i];
     }
 
     /* LR=0: function returns to address 0 → SIGSEGV = call completed */
     regs.uregs[14] = 0;
 
     /* Align SP to 8 bytes (ARM EABI) */
-    regs.uregs[13] = (regs.uregs[13] & ~0x7UL) - 256;
+    regs.uregs[13] = (regs.uregs[13] & ~0x7u) - 256;
 
-    /* Set PC; Thumb bit (bit 0) if target is in Thumb mode */
-    regs.uregs[15] = (unsigned long)func_addr;
-    /* If original PC had Thumb bit set, preserve it */
-    if (orig.uregs[15] & 1) {
-        regs.uregs[15] |= 1;
+    /* Set PC + Thumb mode. For a 32-bit ARM target under an ARM64-host kernel,
+     * the PC field (uregs[15]) does NOT carry the Thumb bit in its LSB — the
+     * kernel writes back the even PC and the CPU then executes ARM (A-state)
+     * instructions, which SIGILLs on Thumb code. Thumb/ARM mode is selected by
+     * the CPSR.T bit (bit 5 = 0x20) in uregs[16] (CPSR). The linker hands us a
+     * function address with LSB=1 for Thumb symbols; we must (1) clear that LSB
+     * from the PC and (2) set CPSR.T to switch to Thumb decoding. Mismatch
+     * (PC odd without CPSR.T, or CPSR.T set with an even PC at a non-2byte
+     * boundary) faults at the first instruction. */
+    int is_thumb = (uint32_t)func_addr & 1;
+    regs.uregs[15] = (uint32_t)func_addr & ~(uint32_t)1;
+    if (is_thumb) {
+        regs.uregs[16] |= 0x20u;  /* CPSR.T bit → Thumb decoding */
+    } else {
+        regs.uregs[16] &= ~0x20u;
     }
+
+    DBG("rc32: SET pc=0x%x sp=0x%x lr=0 cpsr=0x%x (T=%d) r0=0x%x r1=0x%x r2=0x%x",
+        regs.uregs[15], regs.uregs[13], regs.uregs[16], is_thumb,
+        regs.uregs[0], regs.uregs[1], regs.uregs[2]);
 
     iov.iov_len = sizeof(regs);
     if (ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov) < 0) {
+        DBG("rc32: SETREGSET failed: %s", strerror(errno));
         return 0;
     }
 
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) < 0) {
+        DBG("rc32: CONT failed: %s", strerror(errno));
         return 0;
     }
 
     int status;
     waitpid(pid, &status, 0);
+    DBG("rc32: waited status=0x%x (WIFSTOPPED=%d sig=%d WIFSIGNALED=%d)",
+        status, WIFSTOPPED(status), WSTOPSIG(status), WIFSIGNALED(status));
 
     if (ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov) < 0) {
+        DBG("rc32: GETREGSET(after) failed: %s", strerror(errno));
         iov.iov_len = sizeof(orig);
         memcpy(&regs, &orig, sizeof(orig));
         ptrace(PTRACE_SETREGSET, pid, (void *)1, &iov);
@@ -223,6 +270,7 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
     }
 
     u64 result = regs.uregs[0]; /* r0 = return value */
+    DBG("rc32: result r0=0x%x (pc now=0x%x)", regs.uregs[0], regs.uregs[15]);
 
     /* Restore */
     iov.iov_len = sizeof(orig);
@@ -240,12 +288,15 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
  * Returns 0 on success, negative on error (see injector.h).
  */
 int vbi_inject(int pid, const char *so_path, const char *init_sym) {
+    DBG("vbi_inject pid=%d so_path=%s init_sym=%s", pid, so_path, init_sym);
     if (!so_path || pid <= 0) {
+        DBG("invalid args");
         return -1;
     }
 
     /* 1. Attach to the target. */
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
+        DBG("PTRACE_ATTACH failed: %s", strerror(errno));
         return -1; /* denied (permission or SELinux) */
 
     }
@@ -254,26 +305,33 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
     waitpid(pid, &status, 0);
 
     if (WIFEXITED(status)) {
+        DBG("target gone before inject");
         ret = -2; /* target gone */
         goto detach;
     }
+    DBG("attached, status=0x%x", status);
 
     /* 2. Detect target bitness at runtime. */
     int bitness = detect_bitness(pid);
+    DBG("detected bitness=%d", bitness);
     if (bitness != 32 && bitness != 64) {
+        DBG("bitness detection failed");
         ret = -5; /* bitness detection failed */
         goto detach;
     }
 
     /* 3. Resolve __loader_dlopen in the target. */
     u64 dlopen_addr = resolve_loader_symbol(pid, bitness, "__loader_dlopen");
+    DBG("__loader_dlopen @ 0x%llx", (unsigned long long)dlopen_addr);
     if (!dlopen_addr) {
+        DBG("resolve __loader_dlopen FAILED");
         ret = -3; /* dlopen failed (can't even find dlopen) */
         goto detach;
     }
 
     /* 4. Find caller_addr inside app_process (for namespace resolution). */
     u64 caller_addr = find_target_caller_addr(pid);
+    DBG("caller_addr @ 0x%llx", (unsigned long long)caller_addr);
 
     /* 5. Write the .so path string ~8KB below SP (safe from call frame). */
     u64 str_addr = 0;
@@ -287,30 +345,43 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
         str_addr = sp - 8192;
     } else {
         struct user_regs_32 regs;
+        memset(&regs, 0, sizeof(regs));
         struct iovec iov = { &regs, sizeof(regs) };
-        ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
-        u64 sp = regs.uregs[13] & ~0x7ULL;
+        int gr = ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
+        DBG("32-bit GETREGSET rc=%d iov_len=%zu (sizeof user_regs_32=%zu)",
+            gr, iov.iov_len, sizeof(regs));
+        DBG("32-bit raw uregs[13](sp)=0x%x uregs[14](lr)=0x%x uregs[15](pc)=0x%x",
+            regs.uregs[13], regs.uregs[14], regs.uregs[15]);
+        /* uregs is now uint32_t[18] (matches the kernel's 72-byte regset), so
+         * SP is a clean 32-bit value. Align to 8 (ARM EABI). */
+        u64 sp = regs.uregs[13] & ~(u64)0x7;
         str_addr = sp - 8192;
     }
+    DBG("path string @ 0x%llx (sp-based), len=%zu", (unsigned long long)str_addr, path_len);
 
     if (target_write_mem(pid, str_addr, so_path, path_len) < 0) {
+        DBG("target_write_mem for path FAILED: %s", strerror(errno));
         ret = -3;
         goto detach;
     }
+    DBG("path string written ok");
 
     /* 6. Call __loader_dlopen(so_path, RTLD_NOW, caller_addr). */
     u64 args[3] = { str_addr, 2 /* RTLD_NOW */, caller_addr };
     u64 handle;
 
+    DBG("calling __loader_dlopen (bitness=%d)...", bitness);
     if (bitness == 64) {
         handle = remote_call64(pid, dlopen_addr, args, 3);
     }else {
         handle = remote_call32(pid, dlopen_addr, args, 3);
     }
+    DBG("__loader_dlopen returned handle=0x%llx", (unsigned long long)handle);
 
     if (handle == 0) {
         /* dlopen failed — fetch + log the dlerror string for diagnostics. */
         u64 dlerror_addr = resolve_loader_symbol(pid, bitness, "__loader_dlerror");
+        DBG("__loader_dlerror @ 0x%llx", (unsigned long long)dlerror_addr);
         if (dlerror_addr) {
             u64 dlerr_result;
             if (bitness == 64) {
@@ -318,9 +389,12 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
             } else {
                 dlerr_result = remote_call32(pid, dlerror_addr, NULL, 0);
             }
+            DBG("dlerror() returned 0x%llx", (unsigned long long)dlerr_result);
             if (dlerr_result != 0) {
                 char dlerr_buf[256] = {0};
-                if (target_read_mem(pid, dlerr_result, dlerr_buf, sizeof(dlerr_buf) - 1) == 0) {
+                int rd = target_read_mem(pid, dlerr_result, dlerr_buf, sizeof(dlerr_buf) - 1);
+                DBG("target_read_mem(dlerr) = %d", rd);
+                if (rd == 0) {
                     __android_log_print(ANDROID_LOG_ERROR, "voboost-injector",
                                         "remote dlopen(%s) failed: %s", so_path, dlerr_buf);
                 } else {
@@ -332,19 +406,25 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
                 __android_log_print(ANDROID_LOG_ERROR, "voboost-injector",
                                     "remote dlopen(%s) failed (dlerror returned NULL)", so_path);
             }
+        } else {
+            DBG("resolve __loader_dlerror FAILED");
         }
         ret = -3; /* dlopen failed */
         goto detach;
     }
+    DBG("dlopen succeeded, handle=0x%llx", (unsigned long long)handle);
 
     /* 7. Explicit remote-call to init_sym (ctors don't run under ptrace-dlopen). */
     if (init_sym) {
         u64 dlsym_addr = resolve_loader_symbol(pid, bitness, "__loader_dlsym");
+        DBG("__loader_dlsym @ 0x%llx", (unsigned long long)dlsym_addr);
         if (dlsym_addr) {
             /* Write the symbol name string into target memory. */
             size_t sym_len = strlen(init_sym) + 1;
             u64 sym_str_addr = str_addr - sym_len - 16; /* below the path */
+            DBG("sym '%s' @ 0x%llx, len=%zu", init_sym, (unsigned long long)sym_str_addr, sym_len);
             if (target_write_mem(pid, sym_str_addr, init_sym, sym_len) < 0) {
+                DBG("target_write_mem for sym FAILED");
                 ret = -4;
                 goto detach;
             }
@@ -357,8 +437,10 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
             }else {
                 init_addr = remote_call32(pid, dlsym_addr, sym_args, 3);
             }
+            DBG("dlsym(handle, %s) -> init_addr=0x%llx", init_sym, (unsigned long long)init_addr);
 
             if (init_addr == 0) {
+                DBG("init symbol not found");
                 ret = -4; /* init symbol not found */
                 goto detach;
             }
@@ -368,14 +450,19 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
              * (the real config path is delivered via channel B — the
              * daemon passes it separately in injection-control). */
             u64 init_args[1] = { str_addr };
+            DBG("calling init_addr(0x%llx)...", (unsigned long long)str_addr);
             if (bitness == 64) {
                 remote_call64(pid, init_addr, init_args, 1);
             }else {
                 remote_call32(pid, init_addr, init_args, 1);
             }
+            DBG("init_addr call returned");
+        } else {
+            DBG("resolve __loader_dlsym FAILED");
         }
     }
 
+    DBG("inject SUCCESS");
     ret = 0; /* success */
 
 detach:
