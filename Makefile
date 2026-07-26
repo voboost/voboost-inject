@@ -91,6 +91,7 @@ lint-fix:
 test:
 	cd daemon && cargo test
 	$(MAKE) test-injector
+	$(MAKE) test-implant
 
 # Verify the toolchain is present (Rust + cargo-ndk + NDK r29 + uncrustify).
 check:
@@ -453,6 +454,18 @@ test-injector:
 		|| { echo "test-injector: build failed (need a C99 host compiler)" >&2; exit 1; }
 	@./build/elf_parse_test || { echo "test-injector: checks failed" >&2; exit 1; }
 	@echo "test-injector: elf_parse resolver checks ok"
+
+# ---- host unit-test for the implant dirname_of helper ----
+# Compiles implant/dirname_test.cpp against the inline dirname.h (no C++
+# runtime/LSPlant/JNI dependency) and runs it. Silent on success (codestyle).
+HOST_CXX ?= c++
+test-implant:
+	@mkdir -p build
+	@$(HOST_CXX) -std=c++20 -I implant -Wall -Wextra -Werror \
+		implant/dirname_test.cpp -o build/dirname_test \
+		|| { echo "test-implant: build failed (need a C++20 host compiler)" >&2; exit 1; }
+	@./build/dirname_test || { echo "test-implant: checks failed" >&2; exit 1; }
+	@echo "test-implant: dirname_of checks ok"
 
 # ---- build the C++ implant (libimplant.so, per-ABI) ----
 # The in-process loader. Both ABIs produced (the daemon selects at runtime).

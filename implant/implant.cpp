@@ -43,6 +43,7 @@
 
 #include "lsplant.hpp"
 #include "agent_entry_seam.h"
+#include "dirname.h"
 
 /* ---- Dobby logger silencer ----
  *
@@ -76,15 +77,45 @@ static const char *ENTRY_CLASS = AGENT_ENTRY_CLASS_NAME;
 
 /* ---- load native dependencies ---- */
 
+/* Forward decl: payload_dir() takes the address of implant_init, which is
+ * defined later in this file. */
+extern "C" void implant_init(const char *cfg);
+
+/*
+ * payload_dir — resolve the implant's payload directory at runtime via dladdr
+ * on an address within libimplant.so. dli_fname is the full path of the loaded
+ * .so as seen in /proc/<pid>/maps (e.g. /data/voboost-inject/payload/<abi>/
+ * libimplant.so), so its directory is where the payload-shipped deps
+ * (liblsplant.so) sit. Returns empty on dladdr failure or no directory
+ * (native-payload: load payload-shipped native deps by full path). Fails
+ * closed — the caller aborts rather than dlopen a bogus path.
+ */
+static std::string payload_dir() {
+    Dl_info info{};
+    if (dladdr((void *)&implant_init, &info) == 0 || !info.dli_fname) {
+        IMPLANT_LOGE("payload_dir: dladdr failed");
+        return {};
+    }
+    return dirname_of(info.dli_fname);
+}
+
 static bool load_native_libs() {
     if (g_libs_loaded.load(std::memory_order_acquire)) {
         return true;
     }
 
-    /* liblsplant.so — dlopen with RTLD_GLOBAL so C++ symbols are visible. */
-    void *p = dlopen("liblsplant.so", RTLD_NOW | RTLD_GLOBAL);
+    /* liblsplant.so lives next to libimplant.so in the payload directory,
+     * which is not in the target linker's search paths — dlopen it by full
+     * path resolved from our own loaded location (dladdr), not the bare name. */
+    std::string dir = payload_dir();
+    if (dir.empty()) {
+        IMPLANT_LOGE("load_native_libs: cannot resolve payload dir");
+        return false;
+    }
+    std::string lsplant = dir + "/liblsplant.so";
+    void *p = dlopen(lsplant.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (!p) {
-        IMPLANT_LOGE("dlopen liblsplant failed: %s", dlerror());
+        IMPLANT_LOGE("dlopen %s failed: %s", lsplant.c_str(), dlerror());
         return false;
     }
 
