@@ -1,0 +1,73 @@
+diff --git a/lsplant/src/main/jni/CMakeLists.txt b/lsplant/src/main/jni/CMakeLists.txt
+index d96d317..b674f1c 100644
+--- a/lsplant/src/main/jni/CMakeLists.txt
++++ b/lsplant/src/main/jni/CMakeLists.txt
+@@ -5,6 +5,14 @@ find_program(CCACHE ccache)
+ 
+ set(CMAKE_CXX_STANDARD 23)
+ 
++# Disable ALL LSPlant internal logging globally. LSPlant's __android_log_print
++# calls crash when invoked from inside an ART inline-hook trampoline (format-
++# string pointer corruption). LOG_DISABLED (see logging.hpp) makes every LOG*
++# macro a no-op. Defined here at directory scope so it applies to EVERY
++# translation unit, including C++23 module interface units (.cxx/.ixx) whose
++# BMI generation does not reliably inherit target_compile_definitions.
++add_compile_definitions(LOG_DISABLED)
++
+ if (CCACHE)
+     set(CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE})
+     set(CMAKE_C_COMPILER_LAUNCHER ${CCACHE})
+@@ -26,6 +34,14 @@ add_subdirectory(external/dex_builder)
+ 
+ option(LSPLANT_BUILD_SHARED "If ON, lsplant will also build shared library" ON)
+ 
++# Use a non-empty default even when -DDEBUG_SYMBOLS_PATH= is passed empty on the
++# command line (NOT DEFINED would let an empty value through, and the post-build
++# step would then try to create /${ANDROID_ABI} at the filesystem root, which is
++# read-only). The post-build step strips + splits debug symbols under this path.
++if (NOT DEBUG_SYMBOLS_PATH)
++    set(DEBUG_SYMBOLS_PATH ${CMAKE_BINARY_DIR}/symbols)
++endif()
++
+ if (LSPLANT_BUILD_SHARED)
+     message(STATUS "Building lsplant as a shared library")
+     add_library(${PROJECT_NAME} SHARED ${SOURCES})
+@@ -34,8 +50,7 @@ if (LSPLANT_BUILD_SHARED)
+     target_sources(${PROJECT_NAME} PUBLIC FILE_SET CXX_MODULES FILES ${MODULE_INTERFACES})
+     target_include_directories(${PROJECT_NAME} PUBLIC include)
+     target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+-    target_compile_options(${PROJECT_NAME} PRIVATE -flto)
+-    target_link_options(${PROJECT_NAME} PRIVATE -flto)
++    target_compile_definitions(${PROJECT_NAME} PRIVATE LOG_DISABLED)
+     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+             COMMAND ${CMAKE_COMMAND} -E make_directory ${DEBUG_SYMBOLS_PATH}/${ANDROID_ABI}
+             COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:${PROJECT_NAME}>
+@@ -53,7 +68,7 @@ target_sources(${PROJECT_NAME}_static PUBLIC FILE_SET CXX_MODULES FILES ${MODULE
+ target_include_directories(${PROJECT_NAME}_static PUBLIC include)
+ target_include_directories(${PROJECT_NAME}_static PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+ 
+-if (NOT DEFINED DEBUG_SYMBOLS_PATH)
++if (NOT DEBUG_SYMBOLS_PATH)
+     set(DEBUG_SYMBOLS_PATH ${CMAKE_BINARY_DIR}/symbols)
+ endif()
+ 
+diff --git a/lsplant/src/main/jni/include/utils/jni_helper.hpp b/lsplant/src/main/jni/include/utils/jni_helper.hpp
+index 4d38e35..97f82d8 100644
+--- a/lsplant/src/main/jni/include/utils/jni_helper.hpp
++++ b/lsplant/src/main/jni/include/utils/jni_helper.hpp
+@@ -232,6 +232,7 @@ template <typename Func, typename... Args>
+ 
+         ~finally() {
+             if (auto exception = ClearException(env_)) {
++#ifndef LOG_DISABLED
+                 __android_log_print(ANDROID_LOG_ERROR,
+ #ifdef LOG_TAG
+                                     LOG_TAG,
+@@ -239,6 +240,7 @@ template <typename Func, typename... Args>
+                                     "JNIHelper",
+ #endif
+                                     "%s", JUTFString(env_, exception.get()).get());
++#endif
+             }
+         }
+ 

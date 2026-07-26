@@ -1,0 +1,249 @@
+diff --git a/builtin-plugin/SymbolResolver/elf/dobby_symbol_resolver.cc b/builtin-plugin/SymbolResolver/elf/dobby_symbol_resolver.cc
+index 2378433..51b120c 100644
+--- a/builtin-plugin/SymbolResolver/elf/dobby_symbol_resolver.cc
++++ b/builtin-plugin/SymbolResolver/elf/dobby_symbol_resolver.cc
+@@ -170,7 +170,7 @@ void *resolve_elf_internal_symbol(const char *library_name, const char *symbol_n
+   if (library_name) {
+     RuntimeModule module = ProcessRuntime::getModule(library_name);
+ 
+-    if (module.load_address) {
++    if (module.base) {
+       auto mmapFileMng = MmapFileManager(module.path);
+       auto file_mem = mmapFileMng.map();
+ 
+@@ -182,7 +182,7 @@ void *resolve_elf_internal_symbol(const char *library_name, const char *symbol_n
+       }
+ 
+       if (result)
+-        result = (void *)((addr_t)result + (addr_t)module.load_address - ((addr_t)file_mem - (addr_t)ctx.load_bias));
++        result = (void *)((addr_t)result + (addr_t)module.base - ((addr_t)file_mem - (addr_t)ctx.load_bias));
+     }
+   }
+ 
+@@ -190,7 +190,7 @@ void *resolve_elf_internal_symbol(const char *library_name, const char *symbol_n
+     auto ProcessModuleMap = ProcessRuntime::getModuleMap();
+     for (auto module : ProcessModuleMap) {
+ 
+-      if (module.load_address) {
++      if (module.base) {
+         auto mmapFileMng = MmapFileManager(module.path);
+         auto file_mem = mmapFileMng.map();
+ 
+@@ -202,7 +202,7 @@ void *resolve_elf_internal_symbol(const char *library_name, const char *symbol_n
+         }
+ 
+         if (result)
+-          result = (void *)((addr_t)result + (addr_t)module.load_address - ((addr_t)file_mem - (addr_t)ctx.load_bias));
++          result = (void *)((addr_t)result + (addr_t)module.base - ((addr_t)file_mem - (addr_t)ctx.load_bias));
+       }
+ 
+       if (result)
+diff --git a/cmake/compiler_and_linker.cmake b/cmake/compiler_and_linker.cmake
+index 4dc29bd..6f5e9a3 100644
+--- a/cmake/compiler_and_linker.cmake
++++ b/cmake/compiler_and_linker.cmake
+@@ -8,7 +8,14 @@ if (NOT DOBBY_DEBUG)
+   set(linker_flags "${linker_flags} -Wl,-x -Wl,-S")
+ endif ()
+ 
+-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fvisibility=hidden -fPIC -fno-stack-check -fno-stack-protector -fno-exceptions -fno-rtti -fno-common -fno-zero-initialized-in-bss")
++# NOTE: -fPIC removed. Dobby builds as a static archive (dobby_static) that is
++# later linked into libimplant.so (a shared library built with -fPIC by
++# ndk-build). Compiling Dobby itself with -fPIC makes clang 21's integrated-as
++# reject the closure_bridge_arm64.asm symbol references and produces
++# R_AARCH64_ABS64 relocations against the weak handler symbol that lld then
++# refuses when linking the shared library. Without -fPIC the static archive's
++# ABS64 relocations resolve cleanly at the static-link step into libimplant.so.
++set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fvisibility=hidden -fno-stack-check -fno-stack-protector -fno-exceptions -fno-rtti -fno-common -fno-zero-initialized-in-bss")
+ 
+ if (SYSTEM.Darwin)
+   # set(compiler_flags "${compiler_flags} -nostdinc++")
+diff --git a/source/Backend/UserMode/ExecMemory/clear-cache-tool/clear-cache-tool-arm-dummy.cc b/source/Backend/UserMode/ExecMemory/clear-cache-tool/clear-cache-tool-arm-dummy.cc
+index abe26c4..fbac5bf 100644
+--- a/source/Backend/UserMode/ExecMemory/clear-cache-tool/clear-cache-tool-arm-dummy.cc
++++ b/source/Backend/UserMode/ExecMemory/clear-cache-tool/clear-cache-tool-arm-dummy.cc
+@@ -1,7 +1,10 @@
+ #ifndef USER_MODE_CLEAR_CACHE_TOOL_H
+ #define USER_MODE_CLEAR_CACHE_TOOL_H
+ 
+-#include "core/arch/Cpu.h"
++// NOTE: "core/arch/Cpu.h" was removed upstream (master refactored the arch
++// headers); this include is a leftover and the file does not exist. Kept out
++// so the file parses if ever compiled. CpuFeatures is not used here.
++// (Dobby master @ 5dfc854 + r29 build patches.)
+ 
+ #include "PlatformInterface/globals.h"
+ 
+diff --git a/source/Backend/UserMode/ExecMemory/code-patch-tool-posix.cc b/source/Backend/UserMode/ExecMemory/code-patch-tool-posix.cc
+index bfe7361..e5098f2 100644
+--- a/source/Backend/UserMode/ExecMemory/code-patch-tool-posix.cc
++++ b/source/Backend/UserMode/ExecMemory/code-patch-tool-posix.cc
+@@ -1,6 +1,5 @@
+ 
+ #include "dobby/dobby_internal.h"
+-#include "core/arch/Cpu.h"
+ 
+ #include <unistd.h>
+ #include <sys/mman.h>
+diff --git a/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc b/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc
+index 776d25e..1918865 100644
+--- a/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc
++++ b/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc
+@@ -14,7 +14,7 @@
+ #define LINE_MAX 2048
+ 
+ static bool memory_region_comparator(MemRange a, MemRange b) {
+-  return (a.start < b.start);
++  return (a.start() < b.start());
+ }
+ 
+ stl::vector<MemRegion> regions;
+@@ -163,7 +163,7 @@ static stl::vector<RuntimeModule> &get_process_map_with_proc_maps() {
+       path_buffer[strlen(path_buffer) - 1] = 0;
+     }
+     strncpy(module.path, path_buffer, sizeof(module.path) - 1);
+-    module.load_address = (void *)region_start;
++    module.base = (void *)region_start;
+     modules->push_back(module);
+ 
+ #if 0
+@@ -191,11 +191,11 @@ static stl::vector<RuntimeModule> get_process_map_with_linker_iterator() {
+         if (info->dlpi_name && info->dlpi_name[0] == '/')
+           strcpy(module.path, info->dlpi_name);
+ 
+-        module.load_address = (void *)info->dlpi_addr;
++        module.base = (void *)info->dlpi_addr;
+         for (size_t i = 0; i < info->dlpi_phnum; ++i) {
+           if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+             uintptr_t load_bias = (info->dlpi_phdr[i].p_vaddr - info->dlpi_phdr[i].p_offset);
+-            module.load_address = (void *)((addr_t)module.load_address + load_bias);
++            module.base = (void *)((addr_t)module.base + load_bias);
+             break;
+           }
+         }
+diff --git a/source/MemoryAllocator/CodeMemBuffer.h b/source/MemoryAllocator/CodeMemBuffer.h
+index 0c10211..482248d 100644
+--- a/source/MemoryAllocator/CodeMemBuffer.h
++++ b/source/MemoryAllocator/CodeMemBuffer.h
+@@ -93,6 +93,15 @@ struct CodeMemBuffer : MemBuffer {
+ 
+ #if defined(TARGET_ARCH_ARM)
+   enum ExecuteState{ARMExecuteState, ThumbExecuteState};
++  // ARM/Thumb instruction-width typedefs. Upstream Dobby defined these in
++  // source/MemoryAllocator/CodeBuffer/code_buffer_arm.h, which the "Refactor?
++  // Yes" commits (2023-04) deleted without moving the typedefs — leaving the
++  // arm port uncompilable ("unknown type name 'arm_inst_t'"). Mirroring the
++  // arm64 block (which defines arm64_inst_t locally), the typedefs live here.
++  // ARM/Thumb2 instructions are 32-bit; Thumb1 instructions are 16-bit.
++  typedef int32_t arm_inst_t;
++  typedef int16_t thumb1_inst_t;
++  typedef int32_t thumb2_inst_t;
+   arm_inst_t LoadARMInst(uint32_t offset) {
+     return *(arm_inst_t *)(data() + offset);
+   }
+diff --git a/source/PlatformUnifiedInterface/platform.h b/source/PlatformUnifiedInterface/platform.h
+index b946514..9565f85 100644
+--- a/source/PlatformUnifiedInterface/platform.h
++++ b/source/PlatformUnifiedInterface/platform.h
+@@ -1,6 +1,12 @@
+ #pragma once
+ 
+-#include "dobby/common.h"
++#include <stdint.h>
++#include <stddef.h>
++
++// NOTE: dobby/common.h is included at the bottom of this file (after the
++// OSMemory / MemoryPermission definitions) to avoid a circular include.
++// common.h -> os_arch_features.h -> platform.h must see OSMemory already
++// declared when platform.h is the entry translation unit header.
+ 
+ namespace base {
+ 
+@@ -88,4 +94,8 @@ public:
+   static void Print(const char *format, ...);
+ 
+   static void VPrint(const char *format, va_list args);
+-};
+\ No newline at end of file
++};
++
++// Pulled in at the end (see note at top) so that os_arch_features.h (included
++// transitively via common.h) can see OSMemory / MemoryPermission above.
++#include "dobby/common.h"
+\ No newline at end of file
+diff --git a/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm b/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
+index 7349181..18c107a 100644
+--- a/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
++++ b/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
+@@ -50,9 +50,18 @@ str TMP_REG_0, [sp, #(1 * 8)]
+ // call convention: x0 = register context, x1 = interceptor entry
+ mov x0, sp
+ ldr x1, [sp, #(2 * 8 + 2 * 8 + 30 * 8 + 8 * 16)]
+-adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE
+-add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF
+-blr TMP_REG_0
++// Direct call via the PLT. Dobby is built WITHOUT -fPIC (see
++// cmake/compiler_and_linker.cmake): it is a static archive later linked into
++// the shared libimplant.so. lld rejects every PC-relative addressing form
++// (ADR_PREL_PG_HI21, R_AARCH64_ABS64 literal-pool "ldr =") against the
++// defined-but-externally-visible handler when linking the static archive into
++// a shared library, and clang 21's integrated-as rejects the @PAGE/@PAGEOFF
++// form outright ("invalid symbol kind for ADRP relocation"). A direct `bl`
++// emits R_AARCH64_CALL26, which lld resolves through a PLT stub in the shared
++// library — the correct shared-library-safe direct call. The handler's C
++// signature takes (ctx, tramp) in x0/x1, which match the call convention set
++// up above (x0 = sp = ctx, x1 = interceptor entry).
++bl cdecl(common_closure_bridge_handler)
+ 
+ // restore stack, saved original sp
+ add sp, sp, #(2 * 8)
+@@ -91,8 +100,4 @@ ret
+ .globl cdecl(closure_bridge_asm_end)
+ cdecl(closure_bridge_asm_end):
+ 
+-.data
+-.align 8
+-common_closure_bridge_handler_addr:
+-.quad cdecl(common_closure_bridge_handler)
+ #endif
+\ No newline at end of file
+diff --git a/source/TrampolineBridge/ClosureTrampolineBridge/common_bridge_handler.h b/source/TrampolineBridge/ClosureTrampolineBridge/common_bridge_handler.h
+index 9431a7a..7f85627 100644
+--- a/source/TrampolineBridge/ClosureTrampolineBridge/common_bridge_handler.h
++++ b/source/TrampolineBridge/ClosureTrampolineBridge/common_bridge_handler.h
+@@ -13,7 +13,16 @@ void get_routing_bridge_next_hop(DobbyRegisterContext *ctx, void *address);
+ 
+ void set_routing_bridge_next_hop(DobbyRegisterContext *ctx, void *address);
+ 
+-PUBLIC extern "C" inline void common_closure_bridge_handler(DobbyRegisterContext *ctx, ClosureTrampoline *tramp) {
++// NOTE: must NOT be `inline` (non-extern-C) here — that gives it internal
++// linkage, which breaks the asm symbol reference. `extern "C" inline` would
++// also leave the symbol's binding dependent on TU. `__attribute__((weak))` is
++// the clean choice: every TU that includes this header may emit the
++// definition, the linker keeps one copy, and the asm references it via a
++// GOT-indirect load (R_AARCH64_LD64_GOT_LO12_NC, see
++// closure_bridge_arm64.asm) — which lld accepts in a shared library regardless
++// of binding (Dobby is built non-PIC; see cmake/compiler_and_linker.cmake).
++PUBLIC extern "C" __attribute__((weak)) void
++common_closure_bridge_handler(DobbyRegisterContext *ctx, ClosureTrampoline *tramp) {
+   typedef void (*routing_handler_t)(Interceptor::Entry *, DobbyRegisterContext *);
+   auto routing_handler = (routing_handler_t)features::apple::arm64e_pac_strip_and_sign(tramp->carry_handler);
+   routing_handler((Interceptor::Entry *)tramp->carry_data, ctx);
+diff --git a/source/core/arch/arm/registers-arm.h b/source/core/arch/arm/registers-arm.h
+index 65169ba..1228276 100644
+--- a/source/core/arch/arm/registers-arm.h
++++ b/source/core/arch/arm/registers-arm.h
+@@ -2,7 +2,12 @@
+ #define ARCH_ARM_REGISTERS
+ 
+ #include "core/arch/arm/constants-arm.h"
+-#include "core/arch/Cpu.h"
++// NOTE: "core/arch/Cpu.h" was removed upstream (master refactored the arch
++// headers). registers-arm.h needs RegisterBase, which now lives in
++// CpuRegister.h (same as arm64/registers-arm64.h). Point at the real header.
++// (Dobby master @ 5dfc854 + r29 build patches.)
++
++#include "core/arch/CpuRegister.h"
+ 
+ namespace zz {
+ namespace arm {

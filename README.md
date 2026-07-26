@@ -585,7 +585,8 @@ the release workflow validates `v$version == $tag` and fails if they diverge.
 daemon/         Rust daemon source (poll loop, trust, safety, OTA, status)
 injector/       C ptrace injector (ndk-build -> libinjector.a)
 implant/        C++ LSPlant implant (ndk-build -> libimplant.so per ABI)
-prebuilt/       libdobby.a, liblsplant.so, liblsplt.so per ABI (NDK r29)
+third_party/    git submodules: Dobby + LSPlant (built from source, NDK r29)
+prebuilt/       generated libdobby.a + liblsplant.so per ABI (make build-third-party)
 selinux/        voboost-inject.te + file_contexts (ptrace allow rules)
 config/         Build configs (uncrustify), init .rc, dev/release keys
 test/           Host-side unit tests + fixtures + integration test plan
@@ -593,8 +594,10 @@ openspec/specs/ Behavioral specifications (source of truth)
 ```
 
 The native payload toolchain is NDK r29 (Clang 21) for all C/C++ artifacts;
-LSPlant's C++23 modules fail on older NDKs. The prebuilt Dobby/LSPlant/lsplt
-libraries are built from source with NDK r29 (see `prebuilt/README.md`).
+LSPlant's C++23 modules fail on older NDKs. Dobby + LSPlant are built from
+source via `make build-third-party` (c++_static, gated by `make check-prebuilt`
+to ban libc++_shared). liblsplt.so is not used (not in DT_NEEDED of
+liblsplant.so, not dlopened by the implant) and is no longer produced.
 
 ## Source modules
 

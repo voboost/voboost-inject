@@ -1,0 +1,6 @@
+[submodule "third_party/lsplant"]
+	path = third_party/lsplant
+	url = https://github.com/LSPosed/LSPlant.git
+[submodule "third_party/dobby"]
+	path = third_party/dobby
+	url = https://github.com/jmpews/Dobby.git

@@ -12,7 +12,8 @@ export PATH := $(TOOLS_DIR)/bin:$(PATH)
 NDK_HOME ?= $(ANDROID_NDK_HOME)
 
 .PHONY: init build lint lint-fix test check key-dev
-.PHONY: build-native build-injector build-implant build-daemon build-new build-android
+.PHONY: build-native build-third-party build-injector build-implant \
+        build-daemon build-new build-android check-prebuilt
 
 # From a clean clone to a ready environment, identically locally and in CI.
 # The new stack is Rust (cargo + cargo-ndk) and NDK r29 (ndk-build) — no Vala,
@@ -426,6 +427,118 @@ NDK_CLANG ?= $(NDK_TOOLCHAIN)/bin/clang
 NDK_SYSROOT ?= $(NDK_TOOLCHAIN)/sysroot
 PREBUILT_DIR ?= $(PWD)/prebuilt
 
+# Native ABIs the daemon carries (both must be produced — release-manifest spec).
+NATIVE_ABIS ?= arm64-v8a armeabi-v7a
+
+# Third-party (Dobby + LSPlant) build inputs/outputs.
+THIRD_PARTY_DIR ?= $(PWD)/third_party
+THIRD_PARTY_BUILD ?= $(BUILD_DIR)/third_party
+CMAKE_TOOLCHAIN ?= $(NDK_HOME)/build/cmake/android.toolchain.cmake
+CMAKE ?= cmake
+# Patches the upstream submodules need to build with NDK r29 / c++_static. The
+# submodules track clean upstream commits (jmpews/Dobby, LSPosed/LSPlant); these
+# patches are applied to the working tree before CMake so a fresh
+# `git submodule update --init` + `make build-third-party` reproduces the build
+# without carrying a fork (patches/dobby, patches/lsplant). Idempotent: the
+# apply step checks `git -C <sub> diff --quiet` first and skips if already
+# patched. See openspec fix-build-native-wired-source design.md "Patches".
+PATCHES_DIR ?= $(PWD)/patches
+
+# ---- build third-party natives from source (Dobby + LSPlant) ----
+# Wired CMake build of the LSPlant/Dobby git submodules into prebuilt/<abi>/.
+# This replaces the externally-built prebuilts (build-and-signing spec requires
+# c++_static + built-from-source; the prior prebuilts linked libc++_shared.so,
+# which conflicts with the in-process system libc++ on Android 9).
+#
+# LSPlant: built from source for BOTH ABIs (C++23 modules need Ninja; -flto off;
+# LOG_DISABLED at dir scope; c++_static via the NDK toolchain, NOT
+# -DLSPLANT_STANDALONE=ON which calls find_package(cxx) missing in NDK r29).
+#
+# Dobby: built from source for arm64-v8a. armeabi-v7a is NOT built here — master
+# Dobby (jmpews/Dobby @ 5dfc854) is broken for armv7 (the "Refactor? Yes"
+# commits removed source/MemoryAllocator/CodeBuffer/code_buffer_arm.h but left
+# dangling includes; arm_inst_t/thumb{1,2}_inst_t typedefs no longer resolve).
+# The armeabi-v7a/libdobby.a is kept as a committed prebuilt fallback until the
+# upstream armv7 port is restored or reimplemented — see
+# openspec/changes/fix-build-native-wired-source/specs/build-and-signing/spec.md
+# `## Unverified: armeabi-v7a Dobby from source`. arm64-v8a is fully from source.
+build-third-party:
+	@test -n "$(NDK_HOME)" || { echo "build-third-party: ANDROID_NDK_HOME not set" >&2; exit 1; }
+	@test -f "$(CMAKE_TOOLCHAIN)" || { echo "build-third-party: toolchain not found at $(CMAKE_TOOLCHAIN)" >&2; exit 1; }
+	@command -v ninja >/dev/null 2>&1 || { echo "build-third-party: ninja not found (LSPlant C++23 modules need it)" >&2; exit 1; }
+	@mkdir -p $(PREBUILT_DIR)
+	@for sub in dobby lsplant; do \
+	  if git -C $(THIRD_PARTY_DIR)/$$sub apply --reverse --check $(PATCHES_DIR)/$$sub/*.patch >/dev/null 2>&1; then \
+	    echo "build-third-party: $$sub already patched, skipping apply"; \
+	  else \
+	    echo "build-third-party: applying $$sub patches"; \
+	    git -C $(THIRD_PARTY_DIR)/$$sub apply $(PATCHES_DIR)/$$sub/*.patch \
+	      || { echo "build-third-party: $$sub patch apply failed" >&2; exit 1; }; \
+	  fi; \
+	done
+	@for abi in $(NATIVE_ABIS); do \
+	  echo "build-third-party: [$${abi}] Dobby (from source)"; \
+	  $(CMAKE) -S $(THIRD_PARTY_DIR)/dobby -B $(THIRD_PARTY_BUILD)/$${abi}/dobby \
+	    -DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
+	    -DANDROID_ABI=$${abi} -DANDROID_PLATFORM=android-28 \
+	    -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
+	    -DPlugin.SymbolResolver=ON >/dev/null \
+	    || { echo "build-third-party: Dobby configure failed for $${abi}" >&2; exit 1; }; \
+	  if [ "$${abi}" = "armeabi-v7a" ]; then \
+	    echo "build-third-party: [$${abi}] Dobby from source not supported (upstream armv7 port broken); using committed prebuilt fallback"; \
+	  else \
+	    $(CMAKE) --build $(THIRD_PARTY_BUILD)/$${abi}/dobby --target dobby_static -j >/dev/null \
+	      || { echo "build-third-party: Dobby build failed for $${abi}" >&2; exit 1; }; \
+	    mkdir -p $(PREBUILT_DIR)/$${abi}; \
+	    cp $(THIRD_PARTY_BUILD)/$${abi}/dobby/libdobby.a $(PREBUILT_DIR)/$${abi}/libdobby.a; \
+	    echo "build-third-party: [$${abi}] libdobby.a <- source"; \
+	  fi; \
+	  echo "build-third-party: [$${abi}] LSPlant (from source, Ninja)"; \
+	  $(CMAKE) -G Ninja -S $(THIRD_PARTY_DIR)/lsplant/lsplant/src/main/jni \
+	    -B $(THIRD_PARTY_BUILD)/$${abi}/lsplant \
+	    -DCMAKE_TOOLCHAIN_FILE=$(CMAKE_TOOLCHAIN) \
+	    -DANDROID_ABI=$${abi} -DANDROID_PLATFORM=android-28 \
+	    -DANDROID_STL=c++_static -DLSPLANT_BUILD_SHARED=ON \
+	    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF -DCMAKE_BUILD_TYPE=Release >/dev/null \
+	    || { echo "build-third-party: LSPlant configure failed for $${abi}" >&2; exit 1; }; \
+	  $(CMAKE) --build $(THIRD_PARTY_BUILD)/$${abi}/lsplant -j >/dev/null \
+	    || { echo "build-third-party: LSPlant build failed for $${abi}" >&2; exit 1; }; \
+	  mkdir -p $(PREBUILT_DIR)/$${abi}; \
+	  cp $(THIRD_PARTY_BUILD)/$${abi}/lsplant/liblsplant.so $(PREBUILT_DIR)/$${abi}/liblsplant.so; \
+	  echo "build-third-party: [$${abi}] liblsplant.so <- source"; \
+	done
+	@echo "build-third-party: done"
+
+# ---- c++_static gate (build-and-signing invariant) ----
+# Rejects liblsplant.so / libimplant.so that link libc++_shared.so (DT_NEEDED),
+# which conflicts with the in-process system libc++ on Android 9. The prior
+# externally-built prebuilts tripped this; the wired-from-source build (with the
+# NDK toolchain ANDROID_STL=c++_static) does not. This is the gate for the
+# "SHALL be built c++_static" requirement (rule: every SHALL needs a gate).
+READELF ?= $(NDK_TOOLCHAIN)/bin/llvm-readelf
+check-prebuilt:
+	@test -n "$(NDK_HOME)" || { echo "check-prebuilt: ANDROID_NDK_HOME not set" >&2; exit 1; }
+	@for abi in $(NATIVE_ABIS); do \
+	  for so in liblsplant.so; do \
+	    f=$(PREBUILT_DIR)/$${abi}/$${so}; \
+	    test -f "$$f" || { echo "check-prebuilt: missing $$f (run: make build-third-party)" >&2; exit 1; }; \
+	    if $(READELF) -d "$$f" 2>/dev/null | grep -q 'libc++_shared.so'; then \
+	      echo "check-prebuilt: FAIL $$f links libc++_shared.so (must be c++_static)" >&2; exit 1; \
+	    fi; \
+	    echo "check-prebuilt: ok $$f (no libc++_shared)"; \
+	  done; \
+	done
+	@for abi in $(NATIVE_ABIS); do \
+	  f=implant/libs/$${abi}/libimplant.so; \
+	  if [ -f "$$f" ]; then \
+	    if $(READELF) -d "$$f" 2>/dev/null | grep -q 'libc++_shared.so'; then \
+	      echo "check-prebuilt: FAIL $$f links libc++_shared.so" >&2; exit 1; \
+	    fi; \
+	    echo "check-prebuilt: ok $$f (no libc++_shared)"; \
+	  fi; \
+	done
+	@echo "check-prebuilt: c++_static invariant ok"
+
 # ---- build the C injector (libinjector.a) ----
 # A static archive linked into the Rust daemon via build.rs FFI.
 # APP_PLATFORM/APP_ABI/APP_STL are passed on the command line: NDK r29 does not
@@ -477,8 +590,11 @@ build-implant:
 		APP_PLATFORM=android-28 APP_ABI="arm64-v8a armeabi-v7a" APP_STL=c++_static
 	@echo "build-implant: done -> implant/libs/{arm64-v8a,armeabi-v7a}/libimplant.so"
 
-# ---- build all native artifacts (injector + implant) ----
-build-native: build-injector build-implant
+# ---- build all native artifacts (third-party + injector + implant) ----
+# Third-party sources (LSPlant/Dobby) feed prebuilt/<abi>/ which the implant
+# Android.mk consumes as a static Dobby archive. c++_static gate runs after the
+# build to enforce the build-and-signing invariant (libc++_shared banned).
+build-native: build-third-party build-injector build-implant check-prebuilt
 	@echo "build-native: all native artifacts built"
 
 # ---- build the Rust daemon (cargo-ndk, aarch64) ----

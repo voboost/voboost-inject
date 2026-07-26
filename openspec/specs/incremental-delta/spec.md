@@ -8,13 +8,14 @@ TBD - created by archiving change ota. Update Purpose after archive.
 The OTA client SHALL keep its current release manifest, fetch the new signed
 manifest, diff the two by per-file `sha256`, and download only files whose hash
 changed. Unchanged files SHALL NOT be re-downloaded. The diff SHALL cover every
-`inject`-channel file: the daemon ELF and each per-ABI native payload file
-(`libimplant.so`, `liblsplant.so`, `liblsplt.so`, `libdobby.a` — see
+`inject`-channel runtime payload file: the daemon ELF and each per-ABI runtime
+native payload file (`libimplant.so`, `liblsplant.so` — see
 `release-manifest`), so a payload-only update downloads only the changed
-`.so`/`.a` files, not the whole ELF. The stored "current manifest" used as the
-diff base SHALL itself be the last successfully verified manifest; a manifest
-that failed signature or schema verification SHALL NOT be persisted as the
-current manifest.
+`.so` files, not the whole ELF. `libdobby.a` (build-time only) and
+`liblsplt.so` (unused) are not part of the diff because they are not shipped.
+The stored "current manifest" used as the diff base SHALL itself be the last
+successfully verified manifest; a manifest that failed signature or schema
+verification SHALL NOT be persisted as the current manifest.
 
 #### Scenario: One file changed
 

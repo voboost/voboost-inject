@@ -76,19 +76,20 @@ impl Default for BootState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
-    static ENV_LOCK: OnceLock<()> = OnceLock::new();
+    // Serialize tests that touch BOOT_HATCH_ENV: cargo runs tests in parallel
+    // by default, and the env var is process-global, so without a lock the two
+    // tests race (one sets "1" while the other removes it).
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    fn init_env_lock() {
-        ENV_LOCK.get_or_init(|| {
-            // Tests that set env vars are not fully thread-safe, but we run sequentially.
-        });
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
     fn hatch_set_returns_true_and_caches() {
-        init_env_lock();
+        let _guard = env_lock().lock().unwrap();
         std::env::set_var(BOOT_HATCH_ENV, "1");
         let bs = BootState::new();
         assert!(bs.boot_completed());
@@ -99,7 +100,7 @@ mod tests {
 
     #[test]
     fn empty_env_returns_false_no_panic() {
-        init_env_lock();
+        let _guard = env_lock().lock().unwrap();
         std::env::remove_var(BOOT_HATCH_ENV);
         let bs = BootState::new();
         // On a non-Android host getprop fails → returns false.

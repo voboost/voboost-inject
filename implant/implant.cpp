@@ -152,6 +152,8 @@ static bool init_lsplant(JNIEnv *env) {
         .art_symbol_prefix_resolver = [](std::string_view) -> void * {
                                           return nullptr; /* LSPlant marks this "May be null" */
                                       },
+        .executable_memory_allocator = nullptr, /* optional; default pool is used */
+        .executable_memory_recycler = nullptr,  /* optional; must mirror allocator */
     };
 
     bool ok = p_lsplant_init(env, info);

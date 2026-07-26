@@ -3,12 +3,12 @@
 //
 // Ported from Vala ota.vala verify_release_manifest and extended for the ptrace
 // native payload: the manifest now covers the daemon ELF *and* every per-ABI
-// payload file (libimplant.so, liblsplant.so, liblsplt.so, libdobby.a), each
-// carrying an `abi` field. The daemon treats the release manifest — not a
-// directory of files trusted by name — as the authoritative sha256 source for
-// the payload it injects. Fail-closed: the whole manifest is rejected on one
-// bad entry, a bound violation, a missing field, an invalid channel, a per-ABI
-// payload entry missing its abi, or a one-ABI deployment gap.
+// runtime payload file (libimplant.so, liblsplant.so), each carrying an `abi`
+// field. The daemon treats the release manifest — not a directory of files
+// trusted by name — as the authoritative sha256 source for the payload it
+// injects. Fail-closed: the whole manifest is rejected on one bad entry, a
+// bound violation, a missing field, an invalid channel, a per-ABI payload
+// entry missing its abi, or a one-ABI deployment gap.
 
 use serde::Deserialize;
 
@@ -18,18 +18,17 @@ use crate::trust;
 
 /// Byte-size bound (mirrors the daemon plan's MAX_PLAN_BYTES).
 pub const MAX_RELEASE_MANIFEST_BYTES: usize = 1_048_576; // 1 MiB
-/// Entry-count bound. Accommodates the native payload (≈4 files × 2 ABIs) plus
+/// Entry-count bound. Accommodates the native payload (≈2 files × 2 ABIs) plus
 /// the daemon ELF and any agents/app entries, while rejecting pathological
 /// lists.
 pub const MAX_RELEASE_ENTRIES: usize = 4096;
 
-/// The per-ABI native payload files. Each must be listed for BOTH ABIs.
-pub const PAYLOAD_FILES: [&str; 4] = [
-    "libimplant.so",
-    "liblsplant.so",
-    "liblsplt.so",
-    "libdobby.a",
-];
+/// The per-ABI runtime native payload files. Each must be listed for BOTH ABIs.
+/// Build-time-only artifacts are excluded: libdobby.a is linked statically into
+/// libimplant.so at build time and liblsplt.so is unused (not in DT_NEEDED of
+/// liblsplant.so, not dlopened by the implant). Carrying them would bloat the
+/// per-file OTA payloads for no runtime effect (incremental-delta spec).
+pub const PAYLOAD_FILES: [&str; 2] = ["libimplant.so", "liblsplant.so"];
 /// The ABIs the daemon carries.
 pub const REQUIRED_ABIS: [&str; 2] = ["arm64-v8a", "armeabi-v7a"];
 
@@ -260,8 +259,8 @@ fn verify_payload_paths<F: Fn(&str) -> String>(
 mod tests {
     use super::*;
 
-    // A well-formed inject manifest: daemon ELF (single-ABI) + all 4 payload
-    // files for both ABIs.
+    // A well-formed inject manifest: daemon ELF (single-ABI) + all runtime
+    // payload files (libimplant.so + liblsplant.so) for both ABIs.
     fn valid_manifest() -> String {
         let mut entries = vec![String::from(
             r#"{"path":"voboost-inject","channel":"inject","sha256":"aa","size":10,"version":"1"}"#,
@@ -284,7 +283,7 @@ mod tests {
     #[test]
     fn valid_full_payload_manifest_parses() {
         let rm = ReleaseManifest::parse(valid_manifest().as_bytes()).unwrap();
-        assert_eq!(rm.files.len(), 9); // daemon ELF + 4 × 2 ABIs
+        assert_eq!(rm.files.len(), 5); // daemon ELF + 2 payload files × 2 ABIs
         assert_eq!(rm.payload_sha256("libimplant.so", "arm64-v8a"), Some("bb"));
         assert_eq!(rm.payload_sha256("libimplant.so", "x86"), None);
     }

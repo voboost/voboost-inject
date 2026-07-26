@@ -1,30 +1,46 @@
-# prebuilt/ — native payload hooker libraries (per-ABI)
+# prebuilt/ — third-party native libraries (per-ABI), built from source
 
-Prebuilt binary dependencies loaded by `libimplant.so` at runtime. The daemon
-carries both ABIs and selects the matching one based on runtime bitness
-detection (see `native-payload` spec).
+Output directory for the wired from-source build of the LSPlant + Dobby git
+submodules (`make build-third-party`). The implant consumes these: libdobby.a
+is linked statically into libimplant.so at build time, liblsplant.so is
+dlopen'd at runtime (the daemon selects the matching ABI via bitness
+detection — see `native-payload` spec).
 
 ## Contents per ABI (`arm64-v8a/`, `armeabi-v7a/`)
 
-| File | Source | License |
-|---|---|---|
-| `libdobby.a` | [Dobby](https://github.com/jmpews/Dobby) (Apache-2.0) | Static-linked into `libimplant.so` |
-| `liblsplant.so` | [LSPlant](https://github.com/LSPosed/LSPlant) (LGPL-2.1) | `dlopen`'d by implant at runtime |
-| `liblsplt.so` | [lsplt](https://github.com/LSPosed/LSPlant) (LGPL-2.1) | Dependency of liblsplant |
+| File | arm64-v8a | armeabi-v7a | Used by |
+|---|---|---|---|
+| `libdobby.a` | built from source ([Dobby] @ 5dfc854) | **committed fallback** (see below) | `libimplant.so` (static link) |
+| `liblsplant.so` | built from source ([LSPlant] @ a96c797) | built from source ([LSPlant] @ a96c797) | `libimplant.so` (dlopen) |
 
-## Provenance
+[Dobby]: https://github.com/jmpews/Dobby
+[LSPlant]: https://github.com/LSPosed/LSPlant
 
-Built from source with NDK r29 (see `build-and-signing` spec). The committed
-binaries were extracted from the PoC `voboost-inject-new/poc/` Maven prefab
-extracts (built with NDK r29, `c++_static`). Rebuilding from source is the
-canonical path (`make build-native` will invoke the Dobby/LSPlant CMake builds).
+## Generated, not committed (mostly)
+
+All artifacts here are gitignored except the armeabi-v7a Dobby fallback. They
+are produced by `make build-third-party` from the `third_party/{dobby,lsplant}`
+git submodules, and consumed by `make build-implant` (which links
+`libdobby.a`) and by the release-manifest/payload step (which ships
+`liblsplant.so`). Run `make build-native` to regenerate everything.
+
+### armeabi-v7a/libdobby.a — committed fallback
+
+Master Dobby (`jmpews/Dobby` @ 5dfc854) does NOT build for armeabi-v7a: the
+"Refactor? Yes" commits (2023-04) removed
+`source/MemoryAllocator/CodeBuffer/code_buffer_arm.h` but left dangling
+`#include`s plus `arm_inst_t` / `thumb{1,2}_inst_t` typedefs that no longer
+resolve. arm64 builds cleanly from source; armv7 does not. The committed
+`armeabi-v7a/libdobby.a` was built from an older Dobby commit that still had a
+working arm port, and is kept as a fallback until the upstream armv7 port is
+restored or reimplemented. Tracked as `## Unverified` in the build-and-signing
+spec (rule: every SHALL needs a gate; armv7 Dobby-from-source has no gate).
 
 ## Rebuild
 
 ```sh
-# From the repo root (once build-and-signing targets are wired):
-make build-native
+make build-native   # build-third-party + build-injector + build-implant + check-prebuilt
 ```
 
-The build fetches Dobby + LSPlant source, compiles with NDK r29, and
-places the artifacts here.
+The c++_static gate (`make check-prebuilt`) verifies that liblsplant.so /
+libimplant.so do NOT link libc++_shared.so (build-and-signing invariant).

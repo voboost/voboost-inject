@@ -31,7 +31,7 @@ LOCAL_CPP_FEATURES := exceptions rtti
 # C++20 for lsplant compatibility; c++_static (not shared) per build-and-signing
 LOCAL_CPPFLAGS := -std=c++20 -fvisibility=hidden
 # LOG_DISABLED at dir scope — critical: target_compile_definitions does not
-# reach BMI C++23 modules, so we use compile definitions here
+# reach BMI C++23 modules, so we use compile definitions here.
 LOCAL_CFLAGS := -Wall -Wextra -DLOG_DISABLED -O2 -fvisibility=hidden
 # No LTO (build-and-signing: -flto removed for LSPlant C++23 modules)
 LOCAL_LDLIBS := -llog -ldl
