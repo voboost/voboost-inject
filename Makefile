@@ -86,9 +86,11 @@ lint-fix:
 		|| echo "lint-fix: uncrustify not found; C/C++ not reformatted"
 
 # Run the Rust test suite (host, pure-Rust; FFI extern blocks are not linked
-# under check/test). quality-gates owns the full test contract.
+# under check/test) and the C injector host unit-test (elf_parse resolver).
+# quality-gates owns the full test contract.
 test:
 	cd daemon && cargo test
+	$(MAKE) test-injector
 
 # Verify the toolchain is present (Rust + cargo-ndk + NDK r29 + uncrustify).
 check:
@@ -418,6 +420,9 @@ emulator-run:
 # NDK path — required for native builds (C/C++). (Also defined at the top of
 # this Makefile; kept here for proximity to the native targets.)
 NDK_BUILD ?= $(NDK_HOME)/ndk-build
+NDK_TOOLCHAIN ?= $(NDK_HOME)/toolchains/llvm/prebuilt/darwin-x86_64
+NDK_CLANG ?= $(NDK_TOOLCHAIN)/bin/clang
+NDK_SYSROOT ?= $(NDK_TOOLCHAIN)/sysroot
 PREBUILT_DIR ?= $(PWD)/prebuilt
 
 # ---- build the C injector (libinjector.a) ----
@@ -432,6 +437,22 @@ build-injector:
 	cd injector && $(NDK_BUILD) NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
 		APP_PLATFORM=android-28 APP_ABI=arm64-v8a APP_STL=none
 	@echo "build-injector: done -> injector/obj/local/arm64-v8a/libinjector.a"
+
+# ---- host unit-test for the pure ELF symbol parser ----
+# Compiles injector/elf_parse.c (no ptrace, no device, no system-header
+# dependency — ELF types are defined inline in elf_parse.h) and runs it
+# against the real linker64/linker fixtures in test/fixtures/linker/. Silent
+# on success (codestyle). Verified offsets match `llvm-nm --dynamic` on
+# /system/bin/linker{,64}. Uses the host C compiler (any C99 works; elf_parse
+# has no Android-specific headers).
+HOST_CC ?= cc
+test-injector:
+	@mkdir -p build
+	@$(HOST_CC) -I injector -O2 -Wall -Wextra -Werror -std=c99 \
+		injector/elf_parse.c injector/elf_parse_test.c -o build/elf_parse_test \
+		|| { echo "test-injector: build failed (need a C99 host compiler)" >&2; exit 1; }
+	@./build/elf_parse_test || { echo "test-injector: checks failed" >&2; exit 1; }
+	@echo "test-injector: elf_parse resolver checks ok"
 
 # ---- build the C++ implant (libimplant.so, per-ABI) ----
 # The in-process loader. Both ABIs produced (the daemon selects at runtime).

@@ -10,8 +10,9 @@ LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := injector
-LOCAL_SRC_FILES := injector.c elf_resolve.c regs.c
+LOCAL_SRC_FILES := injector.c elf_resolve.c elf_parse.c regs.c
 LOCAL_C_INCLUDES := $(LOCAL_PATH)
 LOCAL_CFLAGS := -Wall -Wextra -Werror -O2 -fvisibility=hidden
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)
+LOCAL_LDLIBS := -llog
 include $(BUILD_STATIC_LIBRARY)

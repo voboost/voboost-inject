@@ -30,6 +30,7 @@
 #include <sys/mman.h>
 #include <signal.h>
 #include <stdint.h>
+#include <android/log.h>
 
 #include "injector.h"
 
@@ -51,7 +52,7 @@ int  target_write_mem(int pid, u64 addr, const void *buf, size_t len);
 int  target_verify_mem(int pid, u64 addr, const void *expected, size_t len);
 u64  find_linker64_rxp_base(int pid);
 u64  find_target_caller_addr(int pid);
-u64  resolve_loader_symbol(int pid, const char *sym_name);
+u64  resolve_loader_symbol(int pid, int bitness, const char *sym_name);
 
 /* ---- bitness detection ---- */
 
@@ -265,7 +266,7 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
     }
 
     /* 3. Resolve __loader_dlopen in the target. */
-    u64 dlopen_addr = resolve_loader_symbol(pid, "__loader_dlopen");
+    u64 dlopen_addr = resolve_loader_symbol(pid, bitness, "__loader_dlopen");
     if (!dlopen_addr) {
         ret = -3; /* dlopen failed (can't even find dlopen) */
         goto detach;
@@ -308,16 +309,29 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
     }
 
     if (handle == 0) {
-        /* dlopen failed — try to get dlerror for diagnostics. */
-        u64 dlerror_addr = resolve_loader_symbol(pid, "__loader_dlerror");
+        /* dlopen failed — fetch + log the dlerror string for diagnostics. */
+        u64 dlerror_addr = resolve_loader_symbol(pid, bitness, "__loader_dlerror");
         if (dlerror_addr) {
             u64 dlerr_result;
             if (bitness == 64) {
                 dlerr_result = remote_call64(pid, dlerror_addr, NULL, 0);
-            }else {
+            } else {
                 dlerr_result = remote_call32(pid, dlerror_addr, NULL, 0);
             }
-            (void)dlerr_result; /* could read the error string for logging */
+            if (dlerr_result != 0) {
+                char dlerr_buf[256] = {0};
+                if (target_read_mem(pid, dlerr_result, dlerr_buf, sizeof(dlerr_buf) - 1) == 0) {
+                    __android_log_print(ANDROID_LOG_ERROR, "voboost-injector",
+                                        "remote dlopen(%s) failed: %s", so_path, dlerr_buf);
+                } else {
+                    __android_log_print(ANDROID_LOG_ERROR, "voboost-injector",
+                                        "remote dlopen(%s) failed (dlerror unreadable @ 0x%llx)",
+                                        so_path, (unsigned long long)dlerr_result);
+                }
+            } else {
+                __android_log_print(ANDROID_LOG_ERROR, "voboost-injector",
+                                    "remote dlopen(%s) failed (dlerror returned NULL)", so_path);
+            }
         }
         ret = -3; /* dlopen failed */
         goto detach;
@@ -325,7 +339,7 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
 
     /* 7. Explicit remote-call to init_sym (ctors don't run under ptrace-dlopen). */
     if (init_sym) {
-        u64 dlsym_addr = resolve_loader_symbol(pid, "__loader_dlsym");
+        u64 dlsym_addr = resolve_loader_symbol(pid, bitness, "__loader_dlsym");
         if (dlsym_addr) {
             /* Write the symbol name string into target memory. */
             size_t sym_len = strlen(init_sym) + 1;

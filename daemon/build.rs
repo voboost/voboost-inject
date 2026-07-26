@@ -63,28 +63,39 @@ fn main() {
     // --- Link the C injector (libinjector.a) via FFI ---
     // The daemon's only extern "C" seam is vbi_inject (injector/injector.h),
     // built by `make build-injector` into injector/obj/local/<abi>/libinjector.a.
-    // cargo-ndk builds for aarch64-linux-android; map the Rust target arch to
-    // the ndk-build ABI dir. Host builds (cargo check/test) do not link the
-    // extern block (FFI symbols are only resolved at final link), so a missing
-    // archive on the host is fine — only emit link directives when the archive
-    // exists.
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let abi = match target_arch.as_str() {
-        "aarch64" => "arm64-v8a",
-        "arm" => "armeabi-v7a",
-        other => other,
-    };
-    let injector_archives = [
-        manifest_dir.join("../injector/obj/local").join(abi).join("libinjector.a"),
-        manifest_dir.join("../injector/libs").join(abi).join("libinjector.a"),
-    ];
-    if let Some(archive) = injector_archives.iter().find(|p| p.exists()) {
-        println!(
-            "cargo:rustc-link-search={}",
-            archive.parent().unwrap().display()
-        );
-        println!("cargo:rustc-link-lib=static=injector");
-        println!("cargo:rerun-if-changed={}", archive.display());
+    // Only emit the link directives for an Android target: host builds
+    // (cargo check/test on the dev machine) must not try to link the Android
+    // ELF archive into a Mach-O/host executable — the extern block is resolved
+    // only at the device link, which is cargo-ndk.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "android" {
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let abi = match target_arch.as_str() {
+            "aarch64" => "arm64-v8a",
+            "arm" => "armeabi-v7a",
+            other => other,
+        };
+        let injector_archives = [
+            manifest_dir
+                .join("../injector/obj/local")
+                .join(abi)
+                .join("libinjector.a"),
+            manifest_dir
+                .join("../injector/libs")
+                .join(abi)
+                .join("libinjector.a"),
+        ];
+        if let Some(archive) = injector_archives.iter().find(|p| p.exists()) {
+            println!(
+                "cargo:rustc-link-search={}",
+                archive.parent().unwrap().display()
+            );
+            println!("cargo:rustc-link-lib=static=injector");
+            println!("cargo:rerun-if-changed={}", archive.display());
+            // injector.c uses __android_log_print (dlerror diagnostics); link
+            // liblog.so so the symbol resolves at the device link.
+            println!("cargo:rustc-link-lib=dylib=log");
+        }
     }
 }
 
