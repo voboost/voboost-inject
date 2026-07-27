@@ -138,7 +138,11 @@ be skipped. The `caller_addr` passed to `__loader_dlopen` SHALL resolve the
 caller's primary namespace (a registered soinfo such as `libart.so`), with a
 fallback to `app_process`. The `.so` path string SHALL be written into the
 target ~8KB below the stack pointer (closer placement is clobbered by the
-`dlopen` call frame).
+`dlopen` call frame); the `config_path` string (see `injection-control`) SHALL
+be written further below that same point (away from SP, not between the `.so`
+path and SP), because the `__loader_dlopen`/`__loader_dlsym` remote calls that
+run before `implant_init` consume stack space closer to SP and would otherwise
+clobber it before `implant_init` reads it.
 
 #### Scenario: dlopen symbol resolved from target memory
 
@@ -167,6 +171,14 @@ target ~8KB below the stack pointer (closer placement is clobbered by the
   calling `__loader_dlopen`
 - **THEN** it places the string ~8KB below the target's stack pointer so the
   `dlopen` call frame does not overwrite it
+
+#### Scenario: Config-path string survives the dlopen/dlsym call frames
+
+- **WHEN** the injector writes the channel-B `config_path` string into the
+  target before the `__loader_dlopen`/`__loader_dlsym` remote calls run
+- **THEN** it places the string further below the stack pointer than the
+  `.so` path (not in the region between the `.so` path and SP), so it is
+  still intact when `implant_init` reads it as `cfg`
 
 ### Requirement: Load via __loader_dlopen and explicit implant_init remote-call
 

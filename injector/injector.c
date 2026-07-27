@@ -287,8 +287,10 @@ static u64 remote_call32(int pid, u64 func_addr, u64 args[], int nargs) {
  *
  * Returns 0 on success, negative on error (see injector.h).
  */
-int vbi_inject(int pid, const char *so_path, const char *init_sym) {
-    DBG("vbi_inject pid=%d so_path=%s init_sym=%s", pid, so_path, init_sym);
+int vbi_inject(int pid, const char *so_path, const char *init_sym,
+                const char *config_path) {
+    DBG("vbi_inject pid=%d so_path=%s init_sym=%s config_path=%s",
+        pid, so_path, init_sym, config_path ? config_path : "(null)");
     if (!so_path || pid <= 0) {
         DBG("invalid args");
         return -1;
@@ -348,6 +350,7 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
         memset(&regs, 0, sizeof(regs));
         struct iovec iov = { &regs, sizeof(regs) };
         int gr = ptrace(PTRACE_GETREGSET, pid, (void *)1, &iov);
+        (void)gr; /* only used by the DBG trace below; avoid -Wunused when VBI_DBG=0 */
         DBG("32-bit GETREGSET rc=%d iov_len=%zu (sizeof user_regs_32=%zu)",
             gr, iov.iov_len, sizeof(regs));
         DBG("32-bit raw uregs[13](sp)=0x%x uregs[14](lr)=0x%x uregs[15](pc)=0x%x",
@@ -365,6 +368,24 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
         goto detach;
     }
     DBG("path string written ok");
+
+    /* 5b. Write the config-path string further below str_addr (away from SP,
+     * same safety margin as the .so path itself — see the "closer is
+     * clobbered by call frame" note above; a slot between str_addr and SP
+     * gets overwritten by the __loader_dlopen/__loader_dlsym remote calls'
+     * own stack usage before init_sym runs). Passed as the sole argument to
+     * init_sym (e.g. implant_init(const char *cfg)) — channel-B config
+     * delivery (native-payload spec). NULL config_path writes an empty
+     * string so the target sees cfg="" rather than a stale/garbage pointer. */
+    u64 cfg_addr = str_addr - 4096;
+    const char *cfg_src = config_path ? config_path : "";
+    size_t cfg_len = strlen(cfg_src) + 1;
+    if (target_write_mem(pid, cfg_addr, cfg_src, cfg_len) < 0) {
+        DBG("target_write_mem for config_path FAILED: %s", strerror(errno));
+        ret = -3;
+        goto detach;
+    }
+    DBG("config path string @ 0x%llx, len=%zu", (unsigned long long)cfg_addr, cfg_len);
 
     /* 6. Call __loader_dlopen(so_path, RTLD_NOW, caller_addr). */
     u64 args[3] = { str_addr, 2 /* RTLD_NOW */, caller_addr };
@@ -445,12 +466,11 @@ int vbi_inject(int pid, const char *so_path, const char *init_sym) {
                 goto detach;
             }
 
-            /* Call init_addr(cfg). The config path is passed as x0/r0.
-             * For the initial port we pass the same so_path as cfg
-             * (the real config path is delivered via channel B — the
-             * daemon passes it separately in injection-control). */
-            u64 init_args[1] = { str_addr };
-            DBG("calling init_addr(0x%llx)...", (unsigned long long)str_addr);
+            /* Call init_addr(cfg). The config path is passed as x0/r0,
+             * pointing at the config_path string written in step 5b (channel-B
+             * per-process config file, not the .so path). */
+            u64 init_args[1] = { cfg_addr };
+            DBG("calling init_addr(0x%llx)...", (unsigned long long)cfg_addr);
             if (bitness == 64) {
                 remote_call64(pid, init_addr, init_args, 1);
             }else {

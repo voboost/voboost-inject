@@ -395,6 +395,9 @@ fn run_daemon(manifest: manifest::Manifest) {
             // agents mapped to this process).
             let config_json = plan.config_for_process(process, &manifest);
             let _ = control_plane::write_config(process, &config_json);
+            let config_path = control_plane::config_file_for(process)
+                .to_string_lossy()
+                .into_owned();
 
             // Verify the native payload's sha256 against the verified release
             // manifest before injecting (trust-verification). Fail-closed: a
@@ -405,7 +408,7 @@ fn run_daemon(manifest: manifest::Manifest) {
                 continue;
             }
 
-            let result = injector::inject(*pid, abi);
+            let result = injector::inject(*pid, abi, &config_path);
             match result {
                 injector::InjectResult::Ok => {
                     watcher.tracker_mut().track(process, *pid);
