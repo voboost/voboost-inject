@@ -170,6 +170,14 @@ fn startup_permitted() -> bool {
     !startup.eq_ignore_ascii_case("none")
 }
 
+/// The on-disk path of a manifest agent's file. Agent files (e.g.
+/// `agents.dex`) are deployed under the payload directory — the same
+/// directory `voboost-install` pushes them to and the implant reads them
+/// from — NOT the root zone.
+fn agent_file_path(file: &str) -> String {
+    format!("{}/{}", config::PAYLOAD_DIR, file)
+}
+
 /// VERIFY_SELF: load + verify manifest.
 fn verify_self() -> Option<manifest::Manifest> {
     let json_bytes = std::fs::read(config::manifest_file()).ok()?;
@@ -184,7 +192,7 @@ fn verify_self() -> Option<manifest::Manifest> {
 
     // Verify every agent sha256.
     for agent in &manifest.agents {
-        let agent_path = format!("{}/{}", config::ROOT_ZONE, agent.file);
+        let agent_path = agent_file_path(&agent.file);
         if !trust::verify_agent(&agent_path, &agent.sha256) {
             log::err("main", &format!("sha256 mismatch: {}", agent.id));
             return None;
@@ -442,5 +450,26 @@ fn run_degraded_loop() {
     log::info("main", "running in DEGRADED mode (observe-only)");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression guard for the ROOT_ZONE/PAYLOAD_DIR mix-up: agent files
+    // (agents.dex) are deployed under the payload directory, not the root
+    // zone, and verify_self's sha256 check must resolve them there.
+    #[test]
+    fn agent_file_path_resolves_under_payload_dir() {
+        assert_eq!(
+            agent_file_path("agents.dex"),
+            format!("{}/agents.dex", config::PAYLOAD_DIR)
+        );
+        assert!(agent_file_path("agents.dex").starts_with(config::PAYLOAD_DIR));
+        assert_ne!(
+            agent_file_path("agents.dex"),
+            format!("{}/agents.dex", config::ROOT_ZONE)
+        );
     }
 }
