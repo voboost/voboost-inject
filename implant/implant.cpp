@@ -67,8 +67,14 @@ extern "C" bool vbi_dobby_inline_unhooker(void *func);
 
 /* ---- LSPlant function pointer types (resolved via dlsym) ---- */
 typedef bool (*lsplant_init_t)(JNIEnv *, const lsplant::InitInfo &);
+/* lsplant::Hook(JNIEnv*, jobject target_method, jobject hooker_object, jobject callback_method) -> jobject backup */
+typedef jobject (*lsplant_hook_t)(JNIEnv *, jobject, jobject, jobject);
+/* lsplant::UnHook(JNIEnv*, jobject target_method) -> bool */
+typedef bool (*lsplant_unhook_t)(JNIEnv *, jobject);
 
 static lsplant_init_t p_lsplant_init = nullptr;
+static lsplant_hook_t p_lsplant_hook = nullptr;
+static lsplant_unhook_t p_lsplant_unhook = nullptr;
 static std::atomic<bool> g_initialized{false};
 static std::atomic<bool> g_libs_loaded{false};
 
@@ -127,8 +133,95 @@ static bool load_native_libs() {
         return false;
     }
 
+    /* Resolve lsplant::Hook/UnHook for the Java Hooker bridge
+     * (ru.voboost.runtime.HookerNative.nativeHook/nativeUnhook). */
+    p_lsplant_hook = (lsplant_hook_t)dlsym(
+        p, "_ZN7lsplant2v24HookEP7_JNIEnvP8_jobjectS4_S4_");
+    if (!p_lsplant_hook) {
+        IMPLANT_LOGE("dlsym lsplant::Hook failed");
+        return false;
+    }
+    p_lsplant_unhook = (lsplant_unhook_t)dlsym(
+        p, "_ZN7lsplant2v26UnHookEP7_JNIEnvP8_jobject");
+    if (!p_lsplant_unhook) {
+        IMPLANT_LOGE("dlsym lsplant::UnHook failed");
+        return false;
+    }
+
     g_libs_loaded.store(true, std::memory_order_release);
     return true;
+}
+
+/* ---- Java Hooker bridge: nativeHook / nativeUnhook ----
+ *
+ * ru.voboost.runtime.HookerNative native methods. Registered in implant_init
+ * after lsplant::Init, before loading the agent dex. Each delegates to the
+ * resolved lsplant::Hook/UnHook.
+ *
+ * Signature (HookerNative.java):
+ *   static native Method nativeHook(Object targetMethod, Object hookerObject, Method callbackMethod);
+ *   static native boolean nativeUnhook(Object targetMethod);
+ */
+static const char *HOOKER_NATIVE_CLASS = "ru/voboost/runtime/HookerNative";
+
+static jobject native_hook_impl(JNIEnv *env, jclass, jobject target_method,
+                                jobject hooker_object, jobject callback_method) {
+    if (!p_lsplant_hook) {
+        IMPLANT_LOGE("nativeHook: lsplant::Hook not resolved");
+        return nullptr;
+    }
+    jobject backup = p_lsplant_hook(env, target_method, hooker_object, callback_method);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        IMPLANT_LOGE("nativeHook: lsplant::Hook threw");
+        return nullptr;
+    }
+    return backup;
+}
+
+static jboolean native_unhook_impl(JNIEnv *env, jclass, jobject target_method) {
+    if (!p_lsplant_unhook) {
+        IMPLANT_LOGE("nativeUnhook: lsplant::UnHook not resolved");
+        return JNI_FALSE;
+    }
+    bool ok = p_lsplant_unhook(env, target_method);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return JNI_FALSE;
+    }
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/* Register the two native methods on HookerNative so the Java Hooker facade
+ * can call them. Called once, after the dex is loaded, with the dex
+ * classloader (HookerNative lives in the dex, so FindClass must use that
+ * loader, not the system one). */
+static void register_hooker_natives(JNIEnv *env, jobject loader) {
+    jclass loaderCls = env->GetObjectClass(loader);
+    jmethodID loadClassMid =
+        env->GetMethodID(loaderCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    jstring name = env->NewStringUTF(HOOKER_NATIVE_CLASS);
+    jclass cls = (jclass)env->CallObjectMethod(loader, loadClassMid, name);
+    env->DeleteLocalRef(name);
+    if (env->ExceptionCheck() || !cls) {
+        env->ExceptionClear();
+        IMPLANT_LOGE("register_hooker_natives: loadClass %s failed", HOOKER_NATIVE_CLASS);
+        return;
+    }
+    JNINativeMethod methods[] = {
+        {"nativeHook",   "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/reflect/Method;)Ljava/lang/reflect/Method;",
+         (void *)native_hook_impl},
+        {"nativeUnhook", "(Ljava/lang/Object;)Z",
+         (void *)native_unhook_impl},
+    };
+    jint rc = env->RegisterNatives(cls, methods, 2);
+    if (rc != 0) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        IMPLANT_LOGE("register_hooker_natives: RegisterNatives failed rc=%d", (int)rc);
+    } else {
+        IMPLANT_LOGI("register_hooker_natives: registered HookerNative");
+    }
+    env->DeleteLocalRef(cls);
 }
 
 /* ---- LSPlant init ---- */
@@ -267,6 +360,11 @@ static bool load_and_call_agent(JNIEnv *env, const char *config_path) {
         return false;
     }
 
+    /* Register the HookerNative bridge (lsplant::Hook/UnHook) on the just-
+     * loaded dex classloader. Must happen before AgentEntry.init so the
+     * agents' Hooker facade resolves nativeHook/nativeUnhook on first use. */
+    register_hooker_natives(env, loader);
+
     /* loadClass(ENTRY_CLASS) */
     jclass loaderCls = env->GetObjectClass(loader);
     jmethodID loadClassMid = env->GetMethodID(
@@ -361,6 +459,11 @@ void implant_init(const char *cfg) {
         IMPLANT_LOGE("LSPlant init failed — aborting");
         return;
     }
+
+    /* 3b. Register the Java Hooker bridge natives (lsplant::Hook/UnHook), so
+     * the agents' Hooker facade can hook methods once the seam runs. This is
+     * called AFTER the dex is loaded (see load_and_call_agent), because
+     * HookerNative lives in the dex and FindClass must use the dex classloader. */
 
     /* 4. Load agent dex and call the seam. */
     load_and_call_agent(env, cfg);
