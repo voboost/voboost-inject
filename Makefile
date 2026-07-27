@@ -333,9 +333,16 @@ STUBS_DIR ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost-stubs
 #   cd ../voboost-install/src-tauri && cargo build --release
 VOBOOST_INSTALL_BIN ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost-install/src-tauri/target/release/voboost-install
 VOBOOST_RELEASE_KEY ?= $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../voboost-install/config/release-public.pem
-VOBOOST_MANIFEST ?= test/fixtures/manifest.json
-VOBOOST_MANIFEST_SIG ?= test/fixtures/manifest.sig
-VOBOOST_AGENTS_DIR ?= test/fixtures/agents
+# MVP (new Java/DEX architecture): one agents.dex bundle + native payload per
+# ABI, from voboost-script/build and implant/libs. Manifest is the bundle
+# manifest (one agents.dex, two agents) signed with key-dev.
+VOBOOST_MANIFEST ?= ../voboost-script/build/manifest.json
+VOBOOST_MANIFEST_SIG ?= ../voboost-script/build/manifest.sig
+VOBOOST_AGENTS_DEX ?= ../voboost-script/build/voboost-agents.dex
+VOBOOST_LIBIMPLANT_ARM64 ?= implant/libs/arm64-v8a/libimplant.so
+VOBOOST_LIBLSPLANT_ARM64 ?= prebuilt/arm64-v8a/liblsplant.so
+VOBOOST_LIBIMPLANT_ARMV7 ?= implant/libs/armeabi-v7a/libimplant.so
+VOBOOST_LIBLSPLANT_ARMV7 ?= prebuilt/armeabi-v7a/liblsplant.so
 
 emulator-run:
 	@test -f "$(EMU_BIN)" || { echo "emulator-run: $(EMU_BIN) missing (run: make build-android)" >&2; exit 2; }
@@ -355,7 +362,11 @@ emulator-run:
 	test -f "$(VOBOOST_APK)" || { echo "emulator-run: $(VOBOOST_APK) missing" >&2; exit 2; }; \
 	ANDROID_SERIAL="$(EMU_SERIAL)" "$(VOBOOST_INSTALL_BIN)" --install "$(VOBOOST_APK)" \
 	  --daemon-bin "$(EMU_BIN)" \
-	  --agents-dir "$(VOBOOST_AGENTS_DIR)" \
+	  --agents-dex "$(VOBOOST_AGENTS_DEX)" \
+	  --libimplant-arm64 "$(VOBOOST_LIBIMPLANT_ARM64)" \
+	  --liblsplant-arm64 "$(VOBOOST_LIBLSPLANT_ARM64)" \
+	  --libimplant-armv7 "$(VOBOOST_LIBIMPLANT_ARMV7)" \
+	  --liblsplant-armv7 "$(VOBOOST_LIBLSPLANT_ARMV7)" \
 	  --manifest "$(VOBOOST_MANIFEST)" \
 	  --manifest-sig "$(VOBOOST_MANIFEST_SIG)" \
 	  --release-key "$(VOBOOST_RELEASE_KEY)" \
@@ -385,20 +396,18 @@ emulator-run:
 	  fi; \
 	done; \
 	echo "emulator-run: app zone created by provision (app-zone step)"; \
-	echo "emulator-run: writing test inject.json (4 agents)"; \
+	echo "emulator-run: writing test inject.json (2 MVP agents)"; \
 	appuid=$$($$a shell "su 0 stat -c %u /data/data/ru.voboost" 2>/dev/null | tr -d '\r'); \
 	appgid=$$($$a shell "su 0 stat -c %g /data/data/ru.voboost" 2>/dev/null | tr -d '\r'); \
 	tmpjson=$$(mktemp -t voboost-inject.XXXXXX) || exit 1; \
 	printf '%s\n' \
 	  '{' \
 	  '  "version": 1,' \
-	  '  "startup": "boot",' \
+	  '  "startup": "interface",' \
 	  '  "log_level": "info",' \
 	  '  "agents": [' \
-	  '    {"id":"wm-viewport","enabled":true},' \
 	  '    {"id":"settings-menu","enabled":true},' \
-	  '    {"id":"low-speed-sound","enabled":true},' \
-	  '    {"id":"launcher-echo","enabled":true}' \
+	  '    {"id":"pedestrian-warning","enabled":true}' \
 	  '  ]' \
 	  '}' > "$$tmpjson"; \
 	$$a push "$$tmpjson" /data/local/tmp/voboost-inject.json >/dev/null \
