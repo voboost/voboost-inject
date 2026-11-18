@@ -1,19 +1,23 @@
-.claude/
-plans
 build/
 target/
+node_modules/
 .tools/
 dist/
+/*.plist
 config/*-private.pem
-# ndk-build output (injector + implant)
 injector/obj/
 injector/libs/
 implant/obj/
 implant/libs/
-# Generated prebuilts (make build-third-party from third_party/ submodules).
-# Only the armeabi-v7a/libdobby.a fallback is committed (upstream Dobby master
-# is broken for armv7 — see openspec build-and-signing ## Unverified).
 prebuilt/arm64-v8a/libdobby.a
 prebuilt/arm64-v8a/liblsplant.so
 prebuilt/armeabi-v7a/liblsplant.so
-code-review-*.md
+
+# Python tooling bytecode
+__pycache__/
+*.py[cod]
+
+/.work162/
+/AGENTS.md.tmp
+/prebuilt/*/libdex_builder_static.a
+/prebuilt/*/liblsplant_static.a

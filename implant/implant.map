@@ -1,0 +1,26 @@
+{
+    global:
+        implant_init;
+        implant_finish_log_handoff;
+        implant_log_read_fd;
+        implant_state_reply_write_fd;
+        JNI_OnLoad;
+        log_internal_impl;
+        # Preserve C++ exception, RTTI and allocation ABI across native modules.
+        _ZTI*;
+        _ZTS*;
+        _ZTV*;
+        _Zn*;
+        _Zd*;
+        _ZSt*;
+        _ZN10__cxxabiv1*;
+        _ZNK10__cxxabiv1*;
+        __cxa_*;
+        __dynamic_cast;
+        __gxx_personality_v0;
+        _Unwind_*;
+        __aeabi_unwind_cpp_pr*;
+        __gnu_Unwind_*;
+    local:
+        *;
+};

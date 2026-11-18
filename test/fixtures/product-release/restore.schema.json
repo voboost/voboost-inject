@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voboost.ru/schemas/restore.schema.json",
+  "title": "Voboost restore authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "releaseIdentity", "sourceDefinitionSha256", "restorableClosureSha256"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "releaseIdentity": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$",
+      "maxLength": 128
+    },
+    "sourceDefinitionSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "restorableClosureSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

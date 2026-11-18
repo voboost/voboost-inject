@@ -1,25 +1,32 @@
 [package]
-name = "voboost-inject"
+name = "voboost-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
+name = "voboost-daemon"
+path = "src/owner/main.rs"
+
+[[bin]]
 name = "voboost-inject"
 path = "src/main.rs"
 
+[[bin]]
+name = "voboost-producer-catalog-verifier"
+path = "src/producer_catalog_verifier.rs"
+
+[features]
+default = []
+
 [dependencies]
-# Tokio async runtime
-tokio = { version = "1", features = ["full"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# File system watching (inotify)
-notify = "6"
 # Unix system calls (ptrace, signals, proc)
 nix = { version = "0.27", features = ["process", "signal", "fs", "user", "ptrace"] }
 # ed25519 signature verification
-ed25519-dalek = "2"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
 # SHA-256
 sha2 = "0.10"
 # Logging
@@ -31,6 +38,11 @@ anyhow = "1"
 hex = "0.4"
 # C library bindings (flock, lchown, etc.)
 libc = "0.2"
+# Strict SemVer parsing and precedence shared by native and generation anti-rollback.
+semver = "1"
+voboost-contract = { path = "../contract" }
+voboost-shared = { path = "../shared" }
+voboost-qconn = { path = "../common/qconn", version = "=1.0.0" }
 
 [build-dependencies]
 # build.rs: embed EMBEDDED_PUBKEY, generate version
@@ -39,3 +51,6 @@ anyhow = "1"
 [dev-dependencies]
 # tempfile: unit tests that need temporary payload files
 tempfile = "3"
+# Native-role fixtures use distinct RFC 8032 seeds. Generation fixtures still
+# decode the repository's catalog-only development PEM.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize", "pkcs8", "pem"] }

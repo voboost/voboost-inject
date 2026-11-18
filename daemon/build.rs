@@ -1,64 +1,124 @@
-// build.rs — embed EMBEDDED_PUBKEY from PEM, generate version module.
+// build.rs — embed role-separated public keys.
 //
-// Reads config/key-dev-public.pem (local dev) or config/release-public.pem (CI)
-// and emits a generated Rust source with the raw 32-byte ed25519 public key.
-// The daemon never reads a key from disk at runtime.
+// Host builds use four distinct fixture roles. Android builds require four
+// explicit public-key paths from
+// the release workflow. The daemon never reads a key from disk at runtime.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[path = "../build_support/strict_ed25519_spki.rs"]
+mod build_key;
+#[path = "../build_support/host_role_keys.rs"]
+mod host_role_keys;
+
 fn main() {
+    println!("cargo:rerun-if-changed=../build_support/strict_ed25519_spki.rs");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    // --- Locate the config dir ---
-    // The daemon crate lives at <repo>/daemon, but the PEM keys live at
-    // <repo>/config. `cargo ndk build` runs with CWD = daemon/, so resolve
-    // relative to CARGO_MANIFEST_DIR and fall back to its parent (the repo
-    // root) where the config/ dir actually is.
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let config_dir = [manifest_dir.join("config"), manifest_dir.join("../config")]
-        .into_iter()
-        .find(|d| d.join("release-public.pem").exists() || d.join("key-dev-public.pem").exists())
-        .expect("build.rs: no config/ dir with a public key PEM found");
 
-    // --- Embed the public key ---
-    // Try release key first (CI), then dev key (local).
-    let key_pem = fs::read(config_dir.join("release-public.pem"))
-        .or_else(|_| fs::read(config_dir.join("key-dev-public.pem")))
-        .expect("build.rs: no public key PEM (release-public.pem / key-dev-public.pem)");
+    // --- Embed the public keys ---
+    // Everything committed in config/ is host-development material. Android
+    // role keys are explicit ephemeral CI inputs and never fall back here.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    println!("cargo:rerun-if-env-changed=VOBOOST_NATIVE_REGISTRY");
+    println!("cargo:rerun-if-env-changed=VOBOOST_BUILD_TARGET");
+    let registry = match env::var_os("VOBOOST_NATIVE_REGISTRY") {
+        Some(path) if !path.is_empty() => {
+            println!("cargo:rerun-if-changed={}", PathBuf::from(&path).display());
+            fs::read_to_string(path).expect("build.rs: native registry is unreadable")
+        }
+        _ if target_os == "android"
+            && env::var("VOBOOST_BUILD_TARGET").as_deref() == Ok("daemon") =>
+        {
+            panic!("build.rs: Android daemon requires the generated VOBOOST_NATIVE_REGISTRY")
+        }
+        _ => "pub static CODECS: &[Codec] = &[];\n".into(),
+    };
+    fs::write(out_dir.join("native_registry.rs"), registry)
+        .expect("build.rs: failed to write native registry");
+    let (catalog_key, release_catalog_key, native_executable_key, restore_key) = if target_os
+        == "android"
+    {
+        let catalog_path = env::var("VOBOOST_AGENT_CATALOG_PUBLIC_KEY_PEM")
+            .expect("build.rs: Android build requires VOBOOST_AGENT_CATALOG_PUBLIC_KEY_PEM");
+        let release_catalog_path = env::var("VOBOOST_RELEASE_CATALOG_PUBLIC_KEY_PEM")
+            .expect("build.rs: Android build requires VOBOOST_RELEASE_CATALOG_PUBLIC_KEY_PEM");
+        let appended_path = env::var("VOBOOST_NATIVE_EXECUTABLE_PUBLIC_KEY_PEM")
+            .expect("build.rs: Android build requires VOBOOST_NATIVE_EXECUTABLE_PUBLIC_KEY_PEM");
+        let restore_path = env::var("VOBOOST_RESTORE_PUBLIC_KEY_PEM")
+            .expect("build.rs: Android build requires VOBOOST_RESTORE_PUBLIC_KEY_PEM");
+        println!("cargo:rerun-if-env-changed=VOBOOST_AGENT_CATALOG_PUBLIC_KEY_PEM");
+        println!("cargo:rerun-if-env-changed=VOBOOST_RELEASE_CATALOG_PUBLIC_KEY_PEM");
+        println!("cargo:rerun-if-env-changed=VOBOOST_NATIVE_EXECUTABLE_PUBLIC_KEY_PEM");
+        println!("cargo:rerun-if-env-changed=VOBOOST_RESTORE_PUBLIC_KEY_PEM");
+        println!("cargo:rerun-if-changed={catalog_path}");
+        println!("cargo:rerun-if-changed={release_catalog_path}");
+        println!("cargo:rerun-if-changed={appended_path}");
+        println!("cargo:rerun-if-changed={restore_path}");
+        (
+            read_public_key(&catalog_path, "agent-catalog"),
+            read_public_key(&release_catalog_path, "release-catalog"),
+            read_public_key(&appended_path, "native-executable-signature"),
+            read_public_key(&restore_path, "restore"),
+        )
+    } else {
+        // RFC 8032 fixture public keys. Their fixture seeds live only in
+        // #[cfg(test)] code; no host test reads persistent private material.
+        host_role_keys::assert_distinct();
+        (
+            host_role_keys::AGENT_CATALOG,
+            host_role_keys::RELEASE_CATALOG,
+            host_role_keys::NATIVE_EXECUTABLE,
+            host_role_keys::RESTORE,
+        )
+    };
 
-    let key_bytes = extract_ed25519_pubkey_from_pem(&key_pem)
-        .expect("build.rs: failed to extract ed25519 pubkey from PEM");
-
-    assert_eq!(key_bytes.len(), 32, "ed25519 public key must be 32 bytes");
+    assert_ne!(
+        catalog_key, native_executable_key,
+        "build.rs: catalog and native-executable public keys must differ"
+    );
+    assert_ne!(
+        restore_key, catalog_key,
+        "build.rs: restore and catalog public keys must differ"
+    );
+    assert_ne!(
+        restore_key, native_executable_key,
+        "build.rs: restore and native-executable public keys must differ"
+    );
+    for (name, key) in [
+        ("agent-catalog", catalog_key),
+        ("native-executable", native_executable_key),
+        ("restore", restore_key),
+    ] {
+        assert_ne!(
+            release_catalog_key, key,
+            "build.rs: release-catalog and {name} public keys must differ"
+        );
+    }
 
     let pubkey_src = format!(
         "// Generated by build.rs — do not edit.\n\
-         /// The compiled-in ed25519 public key (trust anchor). Never read from disk.\n\
-         pub const EMBEDDED_PUBKEY: [u8; 32] = {:?};\n",
-        key_bytes
+         pub static AGENT_CATALOG_PUBKEY: [u8; 32] = {:?};\n\
+         #[used]\n\
+         pub static AGENT_CATALOG_BUILD_IDENTITY: &str = \
+             \"\\0VOBOOST_AGENT_CATALOG_RAW32={}\\0\";\n\
+         pub static RELEASE_CATALOG_PUBKEY: [u8; 32] = {:?};\n\
+         pub static NATIVE_EXECUTABLE_PUBKEY: [u8; 32] = {:?};\n\
+         pub static RESTORE_PUBLIC_KEY: [u8; 32] = {:?};\n",
+        catalog_key,
+        hex_encode(&catalog_key),
+        release_catalog_key,
+        native_executable_key,
+        restore_key
     );
     fs::write(out_dir.join("embedded_pubkey.rs"), pubkey_src)
         .expect("build.rs: failed to write embedded_pubkey.rs");
-
-    // --- Version module ---
-    let version_src = format!(
-        "// Generated by build.rs — do not edit.\n\
-         pub const DAEMON_VERSION: &str = \"{}\";\n",
-        env::var("CARGO_PKG_VERSION").unwrap()
-    );
-    fs::write(out_dir.join("version.rs"), version_src)
-        .expect("build.rs: failed to write version.rs");
-
-    println!(
-        "cargo:rerun-if-changed={}",
-        config_dir.join("key-dev-public.pem").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        config_dir.join("release-public.pem").display()
-    );
+    fs::write(out_dir.join("owner_pubkey.rs"), format!(
+        "// Generated by build.rs.\npub static NATIVE_EXECUTABLE_PUBKEY: [u8; 32] = {native_executable_key:?};\npub static AGENT_CATALOG_PUBKEY: [u8; 32] = {catalog_key:?};\n"
+    )).expect("build.rs: failed to write owner_pubkey.rs");
 
     // --- Link the C injector (libinjector.a) via FFI ---
     // The daemon's only extern "C" seam is vbi_inject (injector/injector.h),
@@ -67,7 +127,6 @@ fn main() {
     // (cargo check/test on the dev machine) must not try to link the Android
     // ELF archive into a Mach-O/host executable — the extern block is resolved
     // only at the device link, which is cargo-ndk.
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "android" {
         let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
         let abi = match target_arch.as_str() {
@@ -87,78 +146,27 @@ fn main() {
         ];
         if let Some(archive) = injector_archives.iter().find(|p| p.exists()) {
             println!(
-                "cargo:rustc-link-search={}",
-                archive.parent().unwrap().display()
+                "cargo:rustc-link-arg-bin=voboost-inject={}",
+                archive.display()
             );
-            println!("cargo:rustc-link-lib=static=injector");
             println!("cargo:rerun-if-changed={}", archive.display());
-            // injector.c uses __android_log_print (dlerror diagnostics); link
-            // liblog.so so the symbol resolves at the device link.
-            println!("cargo:rustc-link-lib=dylib=log");
         }
     }
 }
 
-/// Extract the raw 32-byte ed25519 public key from a PEM file.
-/// PEM format:
-///   -----BEGIN PUBLIC KEY-----
-///   <base64 of SubjectPublicKeyInfo DER>
-///   -----END PUBLIC KEY-----
-///
-/// For ed25519, SubjectPublicKeyInfo is:
-///   SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING <32 bytes> }
-/// The raw key is the last 32 bytes of the DER.
-fn extract_ed25519_pubkey_from_pem(pem: &[u8]) -> Result<[u8; 32], String> {
-    let pem_str = std::str::from_utf8(pem).map_err(|e| format!("PEM not utf8: {e}"))?;
-
-    // Strip PEM headers and join base64 lines.
-    let b64: String = pem_str
-        .lines()
-        .filter(|line| !line.starts_with("-----"))
-        .collect();
-
-    // Decode base64 → DER.
-    let der = base64_decode(&b64)?;
-
-    // For ed25519, the raw 32-byte key is the last 32 bytes of the DER
-    // (after the algorithm identifier OID + BIT STRING tag).
-    if der.len() < 32 {
-        return Err(format!("DER too short: {} bytes", der.len()));
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&der[der.len() - 32..]);
-    Ok(key)
+fn read_public_key(path: &str, role: &str) -> [u8; 32] {
+    let pem = fs::read(path)
+        .unwrap_or_else(|error| panic!("build.rs: cannot read {role} public key {path}: {error}"));
+    build_key::extract_ed25519_pubkey_from_pem(&pem)
+        .unwrap_or_else(|error| panic!("build.rs: invalid {role} public key {path}: {error}"))
 }
 
-/// Minimal base64 decoder (avoids adding a base64 build-dependency).
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let filtered: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    let mut out = Vec::with_capacity(filtered.len() * 3 / 4);
-
-    for chunk in filtered.chunks(4) {
-        let vals: Vec<u8> = chunk
-            .iter()
-            .filter(|&b| *b != b'=')
-            .map(|&b| {
-                TABLE
-                    .iter()
-                    .position(|&t| t == b)
-                    .ok_or_else(|| format!("invalid base64 char: {}", b as char))
-                    .map(|p| p as u8)
-            })
-            .collect::<Result<_, _>>()?;
-
-        if vals.len() >= 2 {
-            out.push((vals[0] << 2) | (vals[1] >> 4));
-        }
-        if vals.len() >= 3 {
-            out.push((vals[1] << 4) | (vals[2] >> 2));
-        }
-        if vals.len() >= 4 {
-            out.push((vals[2] << 6) | vals[3]);
-        }
+fn hex_encode(value: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(value.len() * 2);
+    for byte in value {
+        result.push(HEX[(byte >> 4) as usize] as char);
+        result.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    Ok(out)
+    result
 }

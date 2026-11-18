@@ -1,0 +1,83 @@
+{
+  "schema": "endpoint146-contract-fixtures",
+  "note": "Synthetic host fixtures, not device observations",
+  "accepted": {
+    "targetPid": "2493",
+    "targetStarttime": "888",
+    "endpointEpoch": "6",
+    "generationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalogSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "desiredDocumentGeneration": "1791521183847145209",
+    "acceptedStatus": {
+      "documentGeneration": "1791521183847145209",
+      "receipt": {
+        "sequence": "1",
+        "daemonPid": "100",
+        "daemonStarttime": "700",
+        "bootId": "22a77f16-368f-4a32-96f3-6b773aa8ce15"
+      }
+    }
+  },
+  "pending": {
+    "targetPid": "2493",
+    "targetStarttime": "888",
+    "endpointEpoch": "6",
+    "generationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalogSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "desiredDocumentGeneration": "1791521183847145209"
+  },
+  "reboundPending": {
+    "targetPid": "2493",
+    "targetStarttime": "888",
+    "endpointEpoch": "7",
+    "generationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalogSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "desiredDocumentGeneration": "1791521183847145209"
+  },
+  "staleRejected": {
+    "targetPid": "2493",
+    "targetStarttime": "888",
+    "endpointEpoch": "7",
+    "generationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalogSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "desiredDocumentGeneration": "1791521183847145209",
+    "acceptedStatus": {
+      "documentGeneration": "1791521183847145209",
+      "receipt": {
+        "sequence": "1",
+        "daemonPid": "100",
+        "daemonStarttime": "700",
+        "bootId": "22a77f16-368f-4a32-96f3-6b773aa8ce15"
+      }
+    }
+  },
+  "revisionRejected": {
+    "targetPid": "2493",
+    "targetStarttime": "888",
+    "endpointEpoch": "6",
+    "generationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalogSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "desiredDocumentGeneration": "1791521183847145210",
+    "acceptedStatus": {
+      "documentGeneration": "1791521183847145209",
+      "receipt": {
+        "sequence": "1",
+        "daemonPid": "100",
+        "daemonStarttime": "700",
+        "bootId": "22a77f16-368f-4a32-96f3-6b773aa8ce15"
+      }
+    }
+  },
+  "routedLogMeta": {
+    "process": "com.qinggan.systemservice",
+    "targetPid": "2493",
+    "targetStarttime": "888",
+    "endpointEpoch": "6",
+    "generationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "catalogSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "desiredDocumentGeneration": "1791521183847145209",
+    "daemonPid": "100",
+    "daemonStarttime": "700",
+    "bootId": "22a77f16-368f-4a32-96f3-6b773aa8ce15"
+  }
+}

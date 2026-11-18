@@ -1,41 +1,62 @@
-name: ci
+name: CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
-# Least privilege: checkout-only workflow.
 permissions:
   contents: read
 
-# Cancel a run superseded by a newer push to the same ref so consecutive
-# pushes don't queue up. Deliberately NOT applied to the release workflow —
-# never cancel a release mid-publish.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source with pinned submodules
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
 
-      # Cache the new toolchain's provisioned state: the Cargo registry/index
-      # and the built target/ prefix. Keyed on rust-toolchain.toml + Cargo.lock
-      # (ci-pipeline: cache keyed on the new pins, not frida wraps).
-      - name: Cache Cargo registry + target
-        uses: actions/cache@v4
+      - name: Set up Node.js 24.13.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.13.0'
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            daemon/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'daemon/Cargo.toml') }}
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'daemon/Cargo.toml') }}
 
-      # Provision exactly like a developer. make init installs the OS packages,
-      # the Rust toolchain (from rust-toolchain.toml), cargo-ndk, verifies NDK
-      # r29, and generates the dev keypair. No frida/meson/vala.
-      - name: Provision (make init)
+      - name: Set up Android NDK r29
+        id: setup-ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        with:
+          ndk-version: r29
+
+      - name: Export Android NDK
+        run: echo "ANDROID_NDK_HOME=${{ steps.setup-ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+
+      - name: Provision source toolchain
         run: make init
+
+      - name: Install lockfile-pinned Node.js tooling
+        run: npm ci
+
+      - name: Build disposable Android validation artifacts
+        run: npm run dev:android
+
+      - name: Test repository tooling
+        run: make test-tooling
 
       - name: Lint
         run: make lint
@@ -43,7 +64,8 @@ jobs:
       - name: Test
         run: make test
 
-      # Validation host build (cargo) for the new stack. The device (arm64)
-      # cross-build runs only in the release workflow.
-      - name: Build (host)
+      - name: Production native line and branch coverage
+        run: make coverage
+
+      - name: Build host validation binaries
         run: make build

@@ -1,0 +1,27 @@
+[package]
+name = "voboost-restore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust restore restore boundary"
+build = "build.rs"
+
+[[bin]]
+name = "voboost-restore"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
+hex = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+voboost-contract = { path = "../contract" }
+voboost-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile = "3"

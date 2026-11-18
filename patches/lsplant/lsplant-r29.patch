@@ -51,6 +51,67 @@ index d96d317..b674f1c 100644
      set(DEBUG_SYMBOLS_PATH ${CMAKE_BINARY_DIR}/symbols)
  endif()
  
+diff --git a/lsplant/src/main/jni/include/utils/hook_helper.hpp b/lsplant/src/main/jni/include/utils/hook_helper.hpp
+index 01832f7..2626259 100644
+--- a/lsplant/src/main/jni/include/utils/hook_helper.hpp
++++ b/lsplant/src/main/jni/include/utils/hook_helper.hpp
+@@ -166,7 +166,10 @@ private:
+ };
+ 
+ struct HookHandler {
+-    HookHandler(const InitInfo &info) : info_(info) {}
++    using HookTransaction = std::function<bool(const std::function<bool()> &)>;
++
++    HookHandler(const InitInfo &info, HookTransaction transaction = {})
++        : info_(info), transaction_(std::move(transaction)) {}
+ 
+     template <typename T>
+     [[gnu::always_inline]] bool operator()(T &&arg) const {
+@@ -187,12 +190,13 @@ struct HookHandler {
+     template <FixedString Sym, typename... Us, template <FixedString, typename...> typename T>
+         requires(requires { T<Sym, Us...>::replace_; })
+     [[gnu::always_inline]] bool unhook(const T<Sym, Us...> &hooker) const {
+-        if (hooker.address_ && info_.inline_unhooker && info_.inline_unhooker(hooker.address_)) {
++        if (!transaction_ || !hooker.address_ || !info_.inline_unhooker) return false;
++        return transaction_([&] {
++            if (!info_.inline_unhooker(hooker.address_)) return false;
+             hooker = nullptr;
+             hooker.address_ = nullptr;
+             return true;
+-        }
+-        return false;
++        });
+     }
+ 
+ private:
+@@ -207,8 +211,17 @@ private:
+     template <FixedString Sym, typename... Us, template <FixedString, typename...> typename T>
+         requires(requires { T<Sym, Us...>::replace_; })
+     [[gnu::always_inline]] bool handle(const T<Sym, Us...> &hooker, bool match_prefix) const {
+-        return hooker = hook(hooker.address_ = dlsym<Sym>(match_prefix),
+-                             reinterpret_cast<void *>(hooker.replace_));
++        if (hooker) return true;
++        // Resolve outside the mutator-exclusive scope: resolvers may enter JNI.
++        void *address = dlsym<Sym>(match_prefix);
++        if (!address || !transaction_) return false;
++        return transaction_([&] {
++            hooker.address_ = address;
++            hooker = hook(address, reinterpret_cast<void *>(hooker.replace_));
++            if (hooker) return true;
++            hooker.address_ = nullptr;
++            return false;
++        });
+     }
+ 
+     template <FixedString Sym>
+@@ -230,6 +243,7 @@ private:
+     }
+ 
+     const InitInfo &info_;
++    const HookTransaction transaction_;
+ };
+ 
+ template <typename F>
 diff --git a/lsplant/src/main/jni/include/utils/jni_helper.hpp b/lsplant/src/main/jni/include/utils/jni_helper.hpp
 index 4d38e35..97f82d8 100644
 --- a/lsplant/src/main/jni/include/utils/jni_helper.hpp
@@ -71,3 +132,253 @@ index 4d38e35..97f82d8 100644
              }
          }
  
+diff --git a/lsplant/src/main/jni/lsplant.cc b/lsplant/src/main/jni/lsplant.cc
+index f6c2a13..e19fb3e 100644
+--- a/lsplant/src/main/jni/lsplant.cc
++++ b/lsplant/src/main/jni/lsplant.cc
+@@ -13,6 +13,8 @@ module;
+ 
+ #include <array>
+ #include <atomic>
++#include <chrono>
++#include <cstdint>
+ #include <bit>
+ #include <cstdlib>
+ #include <string>
+@@ -22,6 +24,7 @@ module;
+ 
+ #include "logging.hpp"
+ 
++
+ module lsplant;
+ 
+ import dex_builder;
+@@ -40,6 +43,59 @@ import :jni_id_manager;
+ import :dex_file;
+ import :jit;
+ 
++// Voboost diagnostic callback begin
++namespace voboost_hook_diagnostics {
++using Callback = void (*)(const char *, uint64_t) noexcept;
++static std::atomic<Callback> callback{nullptr};
++static_assert(std::atomic<Callback>::is_always_lock_free);
++
++class Scope {
++public:
++    Scope() noexcept : callback_(callback.load(std::memory_order_acquire)),
++                       started_(callback_ ? Clock::now() : Clock::time_point{}) {}
++    void Emit(const char *stage) const noexcept {
++        if (callback_) {
++            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
++                Clock::now() - started_).count();
++            callback_(stage, static_cast<uint64_t>(elapsed));
++        }
++    }
++private:
++    using Clock = std::chrono::steady_clock;
++    Callback callback_;
++    Clock::time_point started_;
++};
++
++class Stage {
++public:
++    Stage(const Scope &scope, const char *begin, const char *end) noexcept
++        : scope_(scope), end_(end) {
++        scope_.Emit(begin);
++    }
++    ~Stage() { scope_.Emit(end_); }
++private:
++    const Scope &scope_;
++    const char *end_;
++};
++}
++
++extern "C" __attribute__((visibility("default")))
++void voboost_lsplant_set_stage_callback(voboost_hook_diagnostics::Callback callback) noexcept {
++    voboost_hook_diagnostics::callback.store(callback, std::memory_order_release);
++}
++// Voboost diagnostic callback end
++
++// Voboost backup publication transaction begin
++namespace voboost_hook_publication {
++template <typename Publish, typename Activate>
++bool PublishThenActivate(Publish &&publish, Activate &&activate) {
++    if (!publish()) return false;
++    return activate();
++}
++}
++// Voboost backup publication transaction end
++
++
+ namespace lsplant {
+ 
+ using art::ArtMethod;
+@@ -273,16 +329,34 @@ inline void UpdateTrampoline(uint8_t offset) {
+         offset >> (CHAR_BIT - entry_point_offset % CHAR_BIT);
+ }
+ 
+-bool InitNative(JNIEnv *env, const HookHandler &handler) {
++// Voboost inline publication transaction begin
++namespace voboost_inline_publication {
++template <class Section, class Suspend, class Thread, class Cause, class Collector, class Action>
++bool Install(Thread *self, Cause cause, Collector collector, const Action &action) {
++    Section section(self, cause, collector);
++    Suspend suspend("LSPlant inline hook publication", false);
++    return action();
++}
++}  // namespace voboost_inline_publication
++// Voboost inline publication transaction end
++
++bool InitNative(JNIEnv *env, const InitInfo &info) {
++    const HookHandler resolver(info);
++    // These initializers only resolve symbols. No inline hook may precede them.
++    if (!Thread::Init(resolver) || !ScopedSuspendAll::Init(resolver) ||
++        !ScopedGCCriticalSection::Init(resolver)) {
++        LOGE("Failed to init inline hook suspension prerequisites");
++        return false;
++    }
++    const HookHandler handler(info, [](const std::function<bool()> &install) {
++        return voboost_inline_publication::Install<ScopedGCCriticalSection, ScopedSuspendAll>(
++            Thread::Current(), art::gc::kGcCauseDebugger, art::gc::kCollectorTypeDebugger, install);
++    });
+     if (!ArtMethod::Init(env, handler)) {
+         LOGE("Failed to init art method");
+         return false;
+     }
+     UpdateTrampoline(ArtMethod::GetEntryPointOffset());
+-    if (!Thread::Init(handler)) {
+-        LOGE("Failed to init thread");
+-        return false;
+-    }
+     if (!Class::Init(handler)) {
+         LOGE("Failed to init mirror class");
+         return false;
+@@ -295,14 +369,6 @@ bool InitNative(JNIEnv *env, const HookHandler &handler) {
+         LOGE("Failed to init class linker");
+         return false;
+     }
+-    if (!ScopedSuspendAll::Init(handler)) {
+-        LOGE("Failed to init scoped suspend all");
+-        return false;
+-    }
+-    if (!ScopedGCCriticalSection::Init(handler)) {
+-        LOGE("Failed to init scoped gc critical section");
+-        return false;
+-    }
+     if (!JitCodeCache::Init(handler)) {
+         LOGE("Failed to init jit code cache");
+         return false;
+@@ -337,7 +403,8 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
+                                                             std::string_view shorty, bool is_static,
+                                                             std::string_view method_name,
+                                                             std::string_view hooker_class,
+-                                                            std::string_view callback_name) {
++                                                            std::string_view callback_name,
++                                                            const voboost_hook_diagnostics::Scope &diagnostics) {
+     // NOLINTNEXTLINE
+     using namespace startop::dex;
+ 
+@@ -425,6 +492,7 @@ std::tuple<jclass, jfieldID, jmethodID, jmethodID> BuildDex(JNIEnv *env, jobject
+ 
+     jclass target_class = nullptr;
+ 
++    voboost_hook_diagnostics::Stage jni_stage(diagnostics, "jni-begin", "jni-end");
+     ScopedLocalRef<jobject> java_dex_file{nullptr};
+ 
+     if (auto dex_file_class = JNI_FindClass(env, "dalvik/system/DexFile"); dex_file_init_with_cl) {
+@@ -679,15 +747,21 @@ void *GenerateTrampolineFor(art::ArtMethod *hook) {
+     return address_ptr;
+ }
+ 
+-bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
++bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup,
++            const voboost_hook_diagnostics::Scope &diagnostics) {
++    diagnostics.Emit("gc-critical-begin");
+     ScopedGCCriticalSection section(art::Thread::Current(), art::gc::kGcCauseDebugger,
+                                     art::gc::kCollectorTypeDebugger);
++    diagnostics.Emit("gc-critical-end");
++    diagnostics.Emit("suspend-all-begin");
+     ScopedSuspendAll suspend("LSPlant Hook", false);
++    diagnostics.Emit("suspend-all-end");
+     LOGV("Hooking: target = %s(%p), hook = %s(%p), backup = %s(%p)", target->PrettyMethod().c_str(),
+          target, hook->PrettyMethod().c_str(), hook, backup->PrettyMethod().c_str(), backup);
+ 
+     if (auto *entrypoint = GenerateTrampolineFor(hook); !entrypoint) {
+         LOGE("Failed to generate trampoline");
++        diagnostics.Emit("mutation-end");
+         return false;
+         // NOLINTNEXTLINE
+     } else {
+@@ -705,6 +779,7 @@ bool DoHook(ArtMethod *target, ArtMethod *hook, ArtMethod *backup) {
+              target->GetAccessFlags(), target->GetEntryPoint(), backup, backup->GetAccessFlags(),
+              backup->GetEntryPoint(), hook, hook->GetAccessFlags(), hook->GetEntryPoint());
+ 
++        diagnostics.Emit("mutation-end");
+         return true;
+     }
+ }
+@@ -806,8 +881,11 @@ using ::lsplant::IsHooked;
+     return kInit;
+ }
+ 
+-[[maybe_unused]] jobject Hook(JNIEnv *env, jobject target_method, jobject hooker_object,
+-                              jobject callback_method) {
++using HookBackupPublisher = jboolean (*)(JNIEnv *, jobject, jobject);
++
++static jobject HookWithPublisher(JNIEnv *env, jobject target_method, jobject hooker_object,
++                                 jobject callback_method, HookBackupPublisher publisher) {
++    const voboost_hook_diagnostics::Scope diagnostics;
+     if (!target_method || !JNI_IsInstanceOf(env, target_method, executable)) {
+         LOGE("target method is not an executable");
+         return nullptr;
+@@ -852,13 +930,15 @@ using ::lsplant::IsHooked;
+             LOGE("callback_method is not a method of hooker_object");
+             return nullptr;
+         }
++        diagnostics.Emit("build-dex-begin");
+         std::tie(built_class, hooker_field, hook_method, backup_method) = WrapScope(
+             env,
+             BuildDex(env, callback_class_loader.get(),
+                      __builtin_expect(is_proxy, 0) ? GetProxyMethodShorty(env, target_method)
+                                                    : ArtMethod::GetMethodShorty(env, target_method),
+                      is_static, target->IsConstructor() ? "constructor" : target_method_name.get(),
+-                     class_name.get(), callback_method_name.get()));
++                     class_name.get(), callback_method_name.get(), diagnostics));
++        diagnostics.Emit("build-dex-end");
+         if (!built_class || !hooker_field || !hook_method || !backup_method) {
+             LOGE("Failed to generate hooker");
+             return nullptr;
+@@ -875,7 +955,13 @@ using ::lsplant::IsHooked;
+ 
+     JNI_SetStaticObjectField(env, built_class, hooker_field, hooker_object);
+ 
+-    if (DoHook(target, hook, backup)) {
++    if (voboost_hook_publication::PublishThenActivate(
++            [&] {
++                if (!publisher) return true;  // original Hook ABI compatibility
++                return publisher(env, hooker_object, reflected_backup.get()) == JNI_TRUE
++                       && !env->ExceptionCheck();
++            },
++            [&] { return DoHook(target, hook, backup, diagnostics); })) {
+         std::apply(
+             [backup_method, target_method_id = env->FromReflectedMethod(target_method)](auto... v) {
+                 ((*v == target_method_id &&
+@@ -900,6 +986,18 @@ using ::lsplant::IsHooked;
+     return nullptr;
+ }
+ 
++[[maybe_unused]] jobject Hook(JNIEnv *env, jobject target_method, jobject hooker_object,
++                              jobject callback_method) {
++    return HookWithPublisher(env, target_method, hooker_object, callback_method, nullptr);
++}
++
++extern "C" __attribute__((visibility("default")))
++jobject voboost_lsplant_hook_with_backup(JNIEnv *env, jobject target_method, jobject hooker_object,
++                                        jobject callback_method, HookBackupPublisher publisher) {
++    if (!publisher) return nullptr;
++    return HookWithPublisher(env, target_method, hooker_object, callback_method, publisher);
++}
++
+ [[maybe_unused]] bool UnHook(JNIEnv *env, jobject target_method) {
+     if (!target_method || !JNI_IsInstanceOf(env, target_method, executable)) {
+         LOGE("target method is not an executable");

@@ -1,0 +1,169 @@
+# >>> voboost-daemon (do not edit)
+# voboost.rc — canonical Android init service definition.
+#
+# The daemon starts at post-fs-data, before ordinary applications, and remains
+# owned/restarted by Android init. It is deliberately neither `oneshot` nor
+# `disabled`; daemon update and crash recovery use the same service.
+# Update remains owned by its journal and requests one multimedia reboot
+# after the signed runtime switch. It never uses a process-only restart.
+#
+# The SELinux domain transition (voboost_exec -> voboost) is defined by
+# selinux/voboost.te and file_contexts.
+
+# Android init applies the declared capability set to the service.
+# The voboost domains MUST receive their
+# capability set here as well as in selinux/voboost.te: mount(2) remounts
+# (system/vendor boundaries), the /data DAC-override walk and child kill
+# authority all run as init services, and without the effective-set grant the
+# kernel returns EPERM regardless of the SELinux policy allowing the call.
+# Keep each line in sync with the matching self:capability grant in voboost.te
+# (regression test: init_services_carry_their_domain_capability_sets).
+
+# Install continuation is enabled only while the install WAL is active.
+service voboost-install /data/voboost/voboost-install
+    capabilities CHOWN DAC_READ_SEARCH DAC_OVERRIDE SYS_ADMIN
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_install:s0
+
+# The signed fixed-purpose SELinux program performs the no-follow, descriptor-bound
+# relabel before either executable can be started under Enforcing. It publishes
+# the non-persistent readiness property only after revalidating the root inode.
+service voboost-relabel /data/voboost/voboost-selinux --relabel
+    capabilities DAC_OVERRIDE DAC_READ_SEARCH FOWNER
+    class core
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_relabel:s0
+
+# Desktop admission only publishes a boot/catalog-bound request. This existing
+# init-owned service dispatches valid explicit requests; absent or stale input
+# follows the non-creating WAL continuation path. No extra service capabilities.
+service voboost-restore /data/voboost/voboost-restore --init-dispatch
+    capabilities DAC_READ_SEARCH DAC_OVERRIDE SYS_ADMIN
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_restore:s0
+
+# Fixed product-system helper. It accepts no caller paths and reacquires only
+# the update OperationLease named by product-proposal.json.
+service voboost-system-update /data/voboost/voboost-restore --product-system-update
+    capabilities DAC_READ_SEARCH DAC_OVERRIDE SYS_ADMIN
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_restore:s0
+
+service voboost-uninstall /data/voboost/voboost-uninstall
+    capabilities DAC_READ_SEARCH DAC_OVERRIDE KILL SYS_ADMIN SYS_BOOT SYS_PTRACE
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_uninstall:s0
+
+# These terminal services are parsed while the patched policy is loaded. They
+# remain in init memory while the signed uninstall transaction removes its own
+# files. The successor is inert in steady state because committed uninstall
+# authority still exists.
+service voboost-uninstall-watchdog /data/voboost/voboost-uninstall --watch-uninstall
+    capabilities DAC_READ_SEARCH DAC_OVERRIDE KILL SYS_ADMIN SYS_BOOT SYS_PTRACE
+    class late_start
+    user root
+    group root
+    disabled
+    shutdown critical
+    seclabel u:r:voboost_uninstall:s0
+
+service voboost-uninstall-successor /data/voboost/voboost-uninstall --complete-uninstall
+    capabilities DAC_READ_SEARCH DAC_OVERRIDE KILL SYS_ADMIN SYS_BOOT SYS_PTRACE
+    class late_start
+    user root
+    group root
+    disabled
+    shutdown critical
+    seclabel u:r:voboost_uninstall:s0
+
+# Resource uninstall resume: the signed uninstall transaction pauses at the
+# plural owned-overlay removal boot barrier (only the removed package absence
+# after a reboot proves removal). This single-run role is inert unless
+# operation.json names the exact uninstall-app-remove reboot-required phase:
+# the role validates the operation lease itself and exits silently otherwise,
+# which also keeps the registered-service preflight (require_resume_service)
+# satisfied in steady state across reboots.
+service voboost-resource-uninstall-resume /data/voboost/voboost-uninstall --resume-resource-uninstall
+    capabilities DAC_READ_SEARCH DAC_OVERRIDE KILL SYS_ADMIN SYS_BOOT SYS_PTRACE
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_uninstall:s0
+
+on post-fs-data
+    start voboost-relabel
+
+on property:voboost.relabel.ready=1
+    start voboost-install
+    # A restore continuation is admitted only when operation.json names the
+    # exact restore WAL. Starting the disabled oneshot is inert in steady state
+    # and gives init sole ownership after either restore reboot.
+    start voboost-restore
+    start voboost-daemon
+
+on property:sys.boot_completed=1
+    # Package Manager is ready to prove overlay absence. The signed resume
+    # worker uses its own transaction and does not need the product relabeler.
+    start voboost-resource-uninstall-resume
+
+service voboost-daemon /data/voboost/voboost-daemon
+    capabilities SYS_PTRACE DAC_READ_SEARCH DAC_OVERRIDE KILL CHOWN FSETID NET_ADMIN
+    class late_start
+    user root
+    # Inventory hidepid=2 procfs without ptrace checks for every foreign task.
+    # SELinux still controls candidate cmdline and process identity reads.
+    group root readproc
+    disabled
+    seclabel u:r:voboost:s0
+    writepid /data/voboost/run/daemon.pid
+
+on property:init.svc.voboost-daemon=running
+    start voboost-inject
+
+on property:init.svc.voboost-daemon=stopped
+    stop voboost-inject
+
+on property:init.svc.voboost-daemon=restarting
+    stop voboost-inject
+
+service voboost-inject /data/voboost/voboost-inject
+    capabilities SYS_PTRACE DAC_READ_SEARCH DAC_OVERRIDE KILL CHOWN FSETID
+    class late_start
+    user root
+    # Inventory hidepid=2 procfs without ptrace checks for every foreign task.
+    # SELinux still controls candidate cmdline and process identity reads.
+    group root readproc
+    disabled
+    seclabel u:r:voboost:s0
+    writepid /data/voboost/run/inject.pid
+
+# Private init-only reboot executor. The binary revalidates euid, parent init
+# identity, its fixed installed path, operation.json, and both update WALs.
+service voboost-reboot /data/voboost/voboost-inject --reboot
+    class late_start
+    user root
+    group root
+    disabled
+    oneshot
+    seclabel u:r:voboost_reboot:s0

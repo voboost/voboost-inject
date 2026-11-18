@@ -1,0 +1,17 @@
+{
+  "catalogSha256": "bb0c0e5d1b2d227a11561f8d46e84ac78035538758ad971c88f51138de152cc4",
+  "catalogSource": "reviewed prior beta1 catalog with candidate373 PW/FEV targets",
+  "stableAgents": 17,
+  "executors": 1,
+  "catalogTargetRows": 81,
+  "observedResidentRows": 81,
+  "finiteTargets": true,
+  "statusBytesIncludingFinalLf": 745195,
+  "residentReadCapBytes": 1048576,
+  "detailsBytesPerRow": 8192,
+  "reasonBytesPerRow": 128,
+  "allEndpointIdentityFieldsPresent": true,
+  "scope": "reviewed-current-beta1-finite-signed-targets",
+  "requiredReleaseCiCatalogInputEnv": "VOBOOST_ENDPOINT197_CATALOG_PATH",
+  "startupVehicleTargetRows": 9
+}

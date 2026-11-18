@@ -1,0 +1,269 @@
+diff --git a/include/sepol/policydb/avtab.h b/include/sepol/policydb/avtab.h
+index 2ea821c..68ec281 100644
+--- a/include/sepol/policydb/avtab.h
++++ b/include/sepol/policydb/avtab.h
+@@ -73,8 +73,18 @@ typedef struct avtab_key {
+ 	uint16_t specified;	/* what fields are specified */
+ } avtab_key_t;
+ 
++/* Extended permissions (ioctl xperms), final upstream on-disk format:
++ * u8 specified, u8 driver, 8 x u32 perms bitmap.  IOCTLFUNCTION selects
++ * individual ioctl functions within a driver; IOCTLDRIVER selects drivers.
++ * f0506h firmware policy v30 uses this format, not the intermediate
++ * brillo OPNUM layout (u8 type + 8 x u32). */
++#define AVTAB_XPERMS_IOCTLFUNCTION	0x01
++#define AVTAB_XPERMS_IOCTLDRIVER		0x02
++/* Compatibility name used by earlier users of this vendored header. */
++#define AVTAB_XPERMS_IOCTL		AVTAB_XPERMS_IOCTLFUNCTION
+ typedef struct avtab_operations {
+-	uint8_t type;
++	uint8_t specified;
++	uint8_t driver;
+ 	uint32_t perms[8];
+ } avtab_operations_t;
+ 
+diff --git a/include/sepol/policydb/policydb.h b/include/sepol/policydb/policydb.h
+index 4dc3704..0a8825d 100644
+--- a/include/sepol/policydb/policydb.h
++++ b/include/sepol/policydb/policydb.h
+@@ -242,7 +242,8 @@ typedef struct class_perm_node {
+ } class_perm_node_t;
+ 
+ typedef struct av_operations {
+-	uint8_t type;
++	uint8_t specified;
++	uint8_t driver;
+ 	/* 256 bits of ioctl number permissions */
+ 	uint32_t perms[8];
+ } av_operations_t;
+diff --git a/src/avtab.c b/src/avtab.c
+index d3745fe..286f961 100644
+--- a/src/avtab.c
++++ b/src/avtab.c
+@@ -308,6 +308,8 @@ void avtab_destroy(avtab_t * h)
+ 	for (i = 0; i < h->nslot; i++) {
+ 		cur = h->htable[i];
+ 		while (cur != NULL) {
++			if (cur->key.specified & AVTAB_OP)
++				free(cur->datum.ops);
+ 			temp = cur;
+ 			cur = cur->next;
+ 			free(temp);
+@@ -544,7 +546,13 @@ int avtab_read_item(struct policy_file *fp, uint32_t vers, avtab_t * a,
+ 			ERR(fp->handle, "truncated entry");
+ 			return -1;
+ 		}
+-		ops.type = buf8;
++		ops.specified = buf8;
++		rc = next_entry(&buf8, fp, sizeof(uint8_t));
++		if (rc < 0) {
++			ERR(fp->handle, "truncated entry");
++			return -1;
++		}
++		ops.driver = buf8;
+ 		rc = next_entry(buf32, fp, sizeof(uint32_t)*8);
+ 		if (rc < 0) {
+ 			ERR(fp->handle, "truncated entry");
+diff --git a/src/expand.c b/src/expand.c
+index 3f7f3e5..7e6438c 100644
+--- a/src/expand.c
++++ b/src/expand.c
+@@ -1614,7 +1614,8 @@ static avtab_ptr_t find_avtab_node(sepol_handle_t * handle,
+ 	if (key->specified & AVTAB_OPNUM) {
+ 		node = avtab_search_node(avtab, key);
+ 		while (node) {
+-			if (node->datum.ops->type == operations->type) {
++			if (node->datum.ops->specified == operations->specified &&
++			    node->datum.ops->driver == operations->driver) {
+ 				type_match = 1;
+ 				break;
+ 			}
+@@ -1868,7 +1869,8 @@ static int expand_avrule_helper(sepol_handle_t * handle,
+ 				}
+ 				node->datum.ops = ops;
+ 			}
+-			node->datum.ops->type = operations->type;
++			node->datum.ops->specified = operations->specified;
++			node->datum.ops->driver = operations->driver;
+ 			for (i = 0; i < ARRAY_SIZE(operations->perms); i++) {
+ 				node->datum.ops->perms[i] |= operations->perms[i];
+ 			}
+@@ -3154,11 +3156,12 @@ static int expand_avtab_insert(avtab_t * a, avtab_key_t * k, avtab_datum_t * d)
+ 	if (k->specified & AVTAB_OPNUM) {
+ 		/*
+ 		 * AVTAB_OPNUM entries are not necessarily unique.
+-		 * find node with matching ops->type
++		 * find node with matching xperms kind and driver
+ 		 */
+ 		node = avtab_search_node(a, k);
+ 		while (node) {
+-			if (node->datum.ops->type == d->ops->type) {
++			if (node->datum.ops->specified == d->ops->specified &&
++			    node->datum.ops->driver == d->ops->driver) {
+ 				type_match = 1;
+ 				break;
+ 			}
+diff --git a/src/write.c b/src/write.c
+index 36444bf..be72cef 100644
+--- a/src/write.c
++++ b/src/write.c
+@@ -237,7 +237,11 @@ static int avtab_write_item(policydb_t * p,
+ 	}
+ 
+ 	if (cur->key.specified & AVTAB_OP) {
+-		buf8 = cur->datum.ops->type;
++		buf8 = cur->datum.ops->specified;
++		items = put_entry(&buf8, sizeof(uint8_t),1,fp);
++		if (items != 1)
++			return POLICYDB_ERROR;
++		buf8 = cur->datum.ops->driver;
+ 		items = put_entry(&buf8, sizeof(uint8_t),1,fp);
+ 		if (items != 1)
+ 			return POLICYDB_ERROR;
+diff --git a/tests/test-expander.c b/tests/test-expander.c
+index ded1d9d..95366af 100644
+--- a/tests/test-expander.c
++++ b/tests/test-expander.c
+@@ -44,6 +44,7 @@
+ #include <sepol/policydb/conditional.h>
+ #include <limits.h>
+ #include <stdlib.h>
++#include <string.h>
+ 
+ policydb_t role_expanded;
+ policydb_t user_expanded;
+@@ -190,6 +191,123 @@ static void test_expander_alias(void)
+ 	test_alias_datum(&alias_expanded, "alias_check_3_a", "alias_check_3_t", 1, 0);
+ }
+ 
++static void test_expander_keeps_xperms_kinds_separate(void)
++{
++	policydb_t policy;
++	type_datum_t source_type = { .flavor = TYPE_TYPE };
++	type_datum_t target_type = { .flavor = TYPE_TYPE };
++	type_datum_t *types[] = { &source_type, &target_type };
++	ebitmap_t attr_type_map[2];
++	avtab_t source;
++	avtab_t expanded;
++	avtab_key_t key = {
++		.source_type = 1,
++		.target_type = 2,
++		.target_class = 1,
++		.specified = AVTAB_OPNUM_ALLOWED,
++	};
++	avtab_operations_t function_ops = {
++		.specified = AVTAB_XPERMS_IOCTLFUNCTION,
++		.driver = 7,
++		.perms = { 1U << 3 },
++	};
++	avtab_operations_t driver_ops = {
++		.specified = AVTAB_XPERMS_IOCTLDRIVER,
++		.driver = 7,
++		.perms = { 1U << 5 },
++	};
++	avtab_operations_t matching_function_ops = {
++		.specified = AVTAB_XPERMS_IOCTLFUNCTION,
++		.driver = 7,
++		.perms = { 1U << 4 },
++	};
++	avtab_operations_t other_driver_ops = {
++		.specified = AVTAB_XPERMS_IOCTLFUNCTION,
++		.driver = 8,
++		.perms = { 1U << 6 },
++	};
++	avtab_datum_t function_datum = { .ops = &function_ops };
++	avtab_datum_t driver_datum = { .ops = &driver_ops };
++	avtab_datum_t matching_function_datum = { .ops = &matching_function_ops };
++	avtab_datum_t other_driver_datum = { .ops = &other_driver_ops };
++	avtab_ptr_t node;
++	avtab_ptr_t inserted;
++	unsigned int found_function_driver_7 = 0;
++	unsigned int found_function_driver_8 = 0;
++	unsigned int found_driver = 0;
++	int rc;
++
++	memset(&policy, 0, sizeof(policy));
++	memset(&source, 0, sizeof(source));
++	memset(&expanded, 0, sizeof(expanded));
++	ebitmap_init(&attr_type_map[0]);
++	ebitmap_init(&attr_type_map[1]);
++	policy.type_val_to_struct = types;
++	policy.attr_type_map = attr_type_map;
++	rc = avtab_init(&source);
++	CU_ASSERT_EQUAL(rc, 0);
++	if (rc)
++		goto cleanup;
++	rc = avtab_alloc(&source, 4);
++	CU_ASSERT_EQUAL(rc, 0);
++	if (rc)
++		goto cleanup;
++	rc = avtab_init(&expanded);
++	CU_ASSERT_EQUAL(rc, 0);
++	if (rc)
++		goto cleanup;
++	inserted = avtab_insert_nonunique(&source, &key, &function_datum);
++	CU_ASSERT_PTR_NOT_NULL(inserted);
++	if (!inserted)
++		goto cleanup;
++	inserted = avtab_insert_nonunique(&source, &key, &driver_datum);
++	CU_ASSERT_PTR_NOT_NULL(inserted);
++	if (!inserted)
++		goto cleanup;
++	inserted = avtab_insert_nonunique(&source, &key,
++					  &matching_function_datum);
++	CU_ASSERT_PTR_NOT_NULL(inserted);
++	if (!inserted)
++		goto cleanup;
++	inserted = avtab_insert_nonunique(&source, &key, &other_driver_datum);
++	CU_ASSERT_PTR_NOT_NULL(inserted);
++	if (!inserted)
++		goto cleanup;
++	rc = expand_avtab(&policy, &source, &expanded);
++	CU_ASSERT_EQUAL(rc, 0);
++	if (rc)
++		goto cleanup;
++	CU_ASSERT_EQUAL(expanded.nel, 3);
++
++	node = avtab_search_node(&expanded, &key);
++	while (node) {
++		if (node->datum.ops->specified == AVTAB_XPERMS_IOCTLFUNCTION &&
++		    node->datum.ops->driver == 7) {
++			CU_ASSERT_EQUAL(node->datum.ops->perms[0],
++					(1U << 3) | (1U << 4));
++			found_function_driver_7++;
++		} else if (node->datum.ops->specified == AVTAB_XPERMS_IOCTLFUNCTION &&
++			   node->datum.ops->driver == 8) {
++			CU_ASSERT_EQUAL(node->datum.ops->perms[0], 1U << 6);
++			found_function_driver_8++;
++		} else if (node->datum.ops->specified == AVTAB_XPERMS_IOCTLDRIVER) {
++			CU_ASSERT_EQUAL(node->datum.ops->driver, 7);
++			CU_ASSERT_EQUAL(node->datum.ops->perms[0], 1U << 5);
++			found_driver++;
++		}
++		node = avtab_search_node_next(node, key.specified);
++	}
++	CU_ASSERT_EQUAL(found_function_driver_7, 1);
++	CU_ASSERT_EQUAL(found_function_driver_8, 1);
++	CU_ASSERT_EQUAL(found_driver, 1);
++
++cleanup:
++	avtab_destroy(&expanded);
++	avtab_destroy(&source);
++	ebitmap_destroy(&attr_type_map[1]);
++	ebitmap_destroy(&attr_type_map[0]);
++}
++
+ int expander_add_tests(CU_pSuite suite)
+ {
+ 	if (NULL == CU_add_test(suite, "expander_indexes", test_expander_indexes)) {
+@@ -214,5 +332,10 @@ int expander_add_tests(CU_pSuite suite)
+ 		CU_cleanup_registry();
+ 		return CU_get_error();
+ 	}
++	if (NULL == CU_add_test(suite, "expander_xperms_kinds",
++				test_expander_keeps_xperms_kinds_separate)) {
++		CU_cleanup_registry();
++		return CU_get_error();
++	}
+ 	return 0;
+ }

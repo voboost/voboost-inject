@@ -1,0 +1,16 @@
+{
+  "catalogSha256": "ce32deede8a99156cc98fe8a03fcc7ea93b9f7b6418dc2c610df6c9d7a2531bc",
+  "catalogSource": "voboost-agents/build/agents-bundle/agents.json",
+  "stableAgents": 7,
+  "executors": 1,
+  "catalogTargetRows": 52,
+  "observedResidentRows": 49,
+  "finiteTargets": true,
+  "statusBytesIncludingFinalLf": 478518,
+  "residentReadCapBytes": 1048576,
+  "detailsBytesPerRow": 8192,
+  "reasonBytesPerRow": 128,
+  "allEndpointIdentityFieldsPresent": true,
+  "scope": "shipped-beta1-finite-signed-catalog-not-generic-future-4096-target-inputs",
+  "requiredReleaseCiCatalogInputEnv": "VOBOOST_ENDPOINT146_CATALOG_PATH"
+}

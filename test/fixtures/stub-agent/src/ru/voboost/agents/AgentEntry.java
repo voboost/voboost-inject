@@ -1,10 +1,8 @@
 package ru.voboost.agents;
 
-import android.util.Log;
-
 /**
- * Stub AgentEntry for emulator/stubs testing (real agent runtime lives in
- * voboost-script). Implements the fixed seam documented in
+ * Stub AgentEntry for emulator/stubs testing (the real agent runtime is built
+ * by the voboost agents module). Implements the fixed seam documented in
  * implant/include/agent_entry_seam.h:
  *
  *   Class:  ru.voboost.agents.AgentEntry
@@ -19,10 +17,19 @@ import android.util.Log;
  * Defensive: any throw is caught by the implant (target keeps running).
  */
 public class AgentEntry {
-    private static final String TAG = "voboost-stub-agent";
+    public static void registerModule(
+            String id, String entryClass, String[] processes, ClassLoader moduleLoader) {
+        if (processes == null || processes.length == 0) {
+            throw new IllegalArgumentException("module processes are empty");
+        }
+    }
+
+    public static void registerArtifact(String id, byte[] content) {}
+
+    public static void registerGeneration(String generation, String catalogSha256) {}
 
     /** The fixed seam the implant resolves and calls. */
     public static void init(String configPath) {
-        Log.i(TAG, "AgentEntry.init seam called; configPath=" + configPath);
+        Log.info("stub-agent", "AgentEntry.init seam called; configPath=" + configPath);
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "voboost-install"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One-shot in-car install binary with two mandatory reboots"
+build = "build.rs"
+
+[[bin]]
+name = "voboost-install"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
+sha2 = "0.10"
+libc = "0.2"
+anyhow = "1"
+voboost-contract = { path = "../contract" }
+voboost-shared = { path = "../shared" }
+
+[build-dependencies]
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

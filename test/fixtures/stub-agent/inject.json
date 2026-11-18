@@ -1,1 +1,0 @@
-{"version":1,"startup":"run","disabled":false,"log_level":"debug","agents":[{"id":"stub-agent","enabled":true,"config":{"note":"stub test"}}]}

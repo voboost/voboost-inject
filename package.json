@@ -1,0 +1,20 @@
+{
+    "name": "voboost-inject-development-tools",
+    "private": true,
+    "type": "module",
+    "packageManager": "npm@11.6.2",
+    "engines": {
+        "node": "24.13.0"
+    },
+    "scripts": {
+        "check:openspec": "npm run check:openspec:strict && node tools/validate-openspec-evidence.ts",
+        "check:openspec:strict": "openspec validate --all --strict",
+        "check:tooling": "node --test tools/native-exports.test.ts && node tools/test-selinux-label-contract.ts && node tools/test-validate-openspec-evidence.ts && node tools/test-doc-consistency.ts && node tools/test-release-workflow.ts && node tools/test-make-recipes.ts && node tools/test-ephemeral-native-role-keys.ts && node tools/test-build-key-minimality.ts && node tools/test-clean-checkout-contract.ts && node tools/test-no-network-client.ts && node tools/test-no-oem-target-identity.ts && node tools/test-native-reproducible-paths.ts && node tools/test-daemon-versionless.ts && node tools/test-armv7-dobby-prebuilt.ts && node tools/test-third-party-source-contract.ts && node tools/test-native-build-source.ts && node tools/test-dobby-code-patch.ts",
+        "dev:android": "node tools/with-ephemeral-native-role-keys.ts make build-android build-selinux",
+        "audit": "npm audit --audit-level=high --omit=optional"
+    },
+    "devDependencies": {
+        "@fission-ai/openspec": "1.6.0"
+    },
+    "license": "MIT"
+}

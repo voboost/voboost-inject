@@ -1,0 +1,1550 @@
+{
+  "artifacts": {
+    "libvoboost-cluster-inject.so": {
+      "imports": {
+        "RAND_bytes": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "_ZSt9terminatev": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__cxa_begin_catch": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__cxa_end_catch": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__get_errno_ptr": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__gxx_personality_v0": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "abort": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "accept": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "bind": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "chmod": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "clock_gettime": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "close": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "connect": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dl_iterate_phdr": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dladdr": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlclose": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlopen": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlsym": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fchmod": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "free": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fstat": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fstatvfs": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "ftruncate": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getenv": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "geteuid": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getpid": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getppid": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "listen": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "lstat": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "malloc": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mkdir": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mmap": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "munmap": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "open": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "poll": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "posix_memalign": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_attr_destroy": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_attr_init": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_attr_setdetachstate": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_create": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_detach": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_self": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "read": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "setsockopt": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "shm_open": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "socket": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "strnlen": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "unlink": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "usleep": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "write": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      },
+      "needed": [
+        "libc.so.4",
+        "libsocket.so.3",
+        "libcrypto1_1.so.2.1",
+        "libstdc++.so.6"
+      ],
+      "providers": {
+        "RAND_bytes": "crypto",
+        "_ZSt9terminatev": "gnu",
+        "__cxa_begin_catch": "gnu",
+        "__cxa_end_catch": "gnu",
+        "__get_errno_ptr": "libc",
+        "__gxx_personality_v0": "gnu",
+        "abort": "libc",
+        "accept": "socket",
+        "bind": "socket",
+        "chmod": "libc",
+        "clock_gettime": "libc",
+        "close": "libc",
+        "connect": "socket",
+        "dl_iterate_phdr": "libc",
+        "dladdr": "libc",
+        "dlclose": "libc",
+        "dlopen": "libc",
+        "dlsym": "libc",
+        "fchmod": "libc",
+        "free": "libc",
+        "fstat": "libc",
+        "fstatvfs": "libc",
+        "ftruncate": "libc",
+        "getenv": "libc",
+        "geteuid": "libc",
+        "getpid": "libc",
+        "getppid": "libc",
+        "listen": "socket",
+        "lstat": "libc",
+        "malloc": "libc",
+        "mkdir": "libc",
+        "mmap": "libc",
+        "munmap": "libc",
+        "open": "libc",
+        "poll": "libc",
+        "posix_memalign": "libc",
+        "pthread_attr_destroy": "libc",
+        "pthread_attr_init": "libc",
+        "pthread_attr_setdetachstate": "libc",
+        "pthread_create": "libc",
+        "pthread_detach": "libc",
+        "pthread_self": "libc",
+        "read": "libc",
+        "setsockopt": "socket",
+        "shm_open": "libc",
+        "socket": "socket",
+        "strnlen": "libc",
+        "unlink": "libc",
+        "usleep": "libc",
+        "write": "libc"
+      }
+    },
+    "voboost-cluster-daemon": {
+      "imports": {
+        "RAND_bytes": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__get_errno_ptr": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "_init_libc": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "_syspage_ptr": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "OBJECT",
+          "visibility": "DEFAULT"
+        },
+        "abort": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "accept": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "bind": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "clock_gettime": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "close": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "closedir": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "connect": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlopen": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlsym": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "exit": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fchmod": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fcntl": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "free": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fstat": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fstatvfs": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fsync": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "ftruncate": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "geteuid": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getpid": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "kill": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "listen": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "lseek": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "lstat": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "malloc": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mkdir": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mmap": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mount": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mount_parse_generic_args": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "munmap": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "open": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "opendir": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "poll": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "posix_memalign": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_create": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_detach": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "read": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "readdir": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "rename": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "rmdir": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "setsockopt": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "shm_open": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "signal": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "socket": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "sync": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "unlink": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "usleep": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "write": {
+          "binding": "GLOBAL",
+          "defined": false,
+          "size": 0,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      },
+      "needed": [
+        "libc.so.4",
+        "libsocket.so.3",
+        "libcrypto1_1.so.2.1"
+      ],
+      "providers": {
+        "RAND_bytes": "crypto",
+        "__get_errno_ptr": "libc",
+        "_init_libc": "libc",
+        "_syspage_ptr": "libc",
+        "abort": "libc",
+        "accept": "socket",
+        "bind": "socket",
+        "clock_gettime": "libc",
+        "close": "libc",
+        "closedir": "libc",
+        "connect": "socket",
+        "dlopen": "libc",
+        "dlsym": "libc",
+        "exit": "libc",
+        "fchmod": "libc",
+        "fcntl": "libc",
+        "free": "libc",
+        "fstat": "libc",
+        "fstatvfs": "libc",
+        "fsync": "libc",
+        "ftruncate": "libc",
+        "geteuid": "libc",
+        "getpid": "libc",
+        "kill": "libc",
+        "listen": "socket",
+        "lseek": "libc",
+        "lstat": "libc",
+        "malloc": "libc",
+        "mkdir": "libc",
+        "mmap": "libc",
+        "mount": "libc",
+        "mount_parse_generic_args": "libc",
+        "munmap": "libc",
+        "open": "libc",
+        "opendir": "libc",
+        "poll": "libc",
+        "posix_memalign": "libc",
+        "pthread_create": "libc",
+        "pthread_detach": "libc",
+        "read": "libc",
+        "readdir": "libc",
+        "rename": "libc",
+        "rmdir": "libc",
+        "setsockopt": "socket",
+        "shm_open": "libc",
+        "signal": "libc",
+        "socket": "socket",
+        "sync": "libc",
+        "unlink": "libc",
+        "usleep": "libc",
+        "write": "libc"
+      }
+    }
+  },
+  "dynamicLookups": {
+    "crypto": [
+      "ERR_get_error",
+      "EVP_sha256",
+      "X509_VERIFY_PARAM_set_flags",
+      "X509_digest",
+      "X509_free"
+    ],
+    "ssl": [
+      "OPENSSL_init_ssl",
+      "SSL_CTX_check_private_key",
+      "SSL_CTX_ctrl",
+      "SSL_CTX_free",
+      "SSL_CTX_get0_param",
+      "SSL_CTX_load_verify_locations",
+      "SSL_CTX_new",
+      "SSL_CTX_set_verify",
+      "SSL_CTX_use_PrivateKey_file",
+      "SSL_CTX_use_certificate_chain_file",
+      "SSL_accept",
+      "SSL_free",
+      "SSL_get1_peer_certificate",
+      "SSL_get_error",
+      "SSL_get_peer_certificate",
+      "SSL_get_verify_result",
+      "SSL_new",
+      "SSL_read",
+      "SSL_set_fd",
+      "SSL_write",
+      "TLS_server_method"
+    ]
+  },
+  "libraries": {
+    "crypto": {
+      "sha256": "ca3354fc16488f389b1a0f606632af65b99f4ac7fbbcb06e8440400b486870dd",
+      "soname": "libcrypto1_1.so.2.1",
+      "symbols": {
+        "ERR_get_error": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 44,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "EVP_sha256": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 12,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "RAND_bytes": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 108,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "X509_VERIFY_PARAM_set_flags": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 84,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "X509_digest": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 156,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "X509_free": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 44,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      }
+    },
+    "gnu": {
+      "provenance": "actual-a9-a11-gnu-defined-symbol-interface",
+      "soname": "libstdc++.so.6",
+      "symbols": {
+        "_ZSt9terminatev": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 16,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__cxa_begin_catch": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 168,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__cxa_end_catch": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 160,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "__gxx_personality_v0": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 1296,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      }
+    },
+    "libc": {
+      "sha256": "e359175048e592d729e8688c0ba69dbbb089addf45740e7d88ed45b08a392f53",
+      "soname": "libc.so.4",
+      "symbols": {
+        "__get_errno_ptr": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 12,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "_init_libc": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 464,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "_syspage_ptr": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 8,
+          "type": "OBJECT",
+          "visibility": "DEFAULT"
+        },
+        "abort": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 212,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "chmod": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 132,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "clock_gettime": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 56,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "close": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 200,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "closedir": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 120,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dl_iterate_phdr": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 272,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dladdr": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 60,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlclose": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 140,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlopen": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 3452,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "dlsym": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 1228,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "exit": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 28,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fchmod": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 104,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fcntl": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 140,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "free": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 4,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fstat": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 200,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fstatvfs": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 132,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "fsync": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 108,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "ftruncate": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 320,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getenv": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 124,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "geteuid": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 84,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getpid": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 12,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "getppid": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 120,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "kill": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 28,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "lseek": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 128,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "lstat": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 8,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "malloc": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 4,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mkdir": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 16,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mmap": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 40,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mount": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 336,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "mount_parse_generic_args": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 636,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "munmap": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 8,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "open": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 144,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "opendir": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 496,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "poll": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 164,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "posix_memalign": {
+          "binding": "WEAK",
+          "defined": true,
+          "size": 4,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pread": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 152,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_attr_destroy": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 8,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_attr_init": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 172,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_attr_setdetachstate": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 48,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_create": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 140,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_detach": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 4,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "pthread_self": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 12,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "read": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 136,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "readdir": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 244,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "rename": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 472,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "rmdir": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 108,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "shm_open": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 92,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "signal": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 108,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "strnlen": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 56,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "sync": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 8,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "unlink": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 160,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "usleep": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 136,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "write": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 160,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      }
+    },
+    "socket": {
+      "sha256": "f1b620419eba1339b91b9f20cf579d1fd441d6f95b7843e8454384b6f71dfb54",
+      "soname": "libsocket.so.3",
+      "symbols": {
+        "accept": {
+          "binding": "GLOBAL",
+          "defaultVersion": "libsocket.so.2",
+          "defined": true,
+          "size": 672,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "bind": {
+          "binding": "GLOBAL",
+          "defaultVersion": "libsocket.so.2",
+          "defined": true,
+          "size": 104,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "connect": {
+          "binding": "GLOBAL",
+          "defaultVersion": "libsocket.so.2",
+          "defined": true,
+          "size": 296,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "listen": {
+          "binding": "GLOBAL",
+          "defaultVersion": "libsocket.so.2",
+          "defined": true,
+          "size": 44,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "setsockopt": {
+          "binding": "GLOBAL",
+          "defaultVersion": "libsocket.so.2",
+          "defined": true,
+          "size": 392,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "socket": {
+          "binding": "GLOBAL",
+          "defaultVersion": "libsocket.so.2",
+          "defined": true,
+          "size": 644,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      }
+    },
+    "ssl": {
+      "sha256": "69f8c9bdc85a0ab814a425502c69a9b9ef9e3e3c370a875d21e59dd11d3aebbb",
+      "soname": "libssl1_1.so.2.1",
+      "symbols": {
+        "OPENSSL_init_ssl": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 392,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_check_private_key": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 204,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_ctrl": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 1556,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_free": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 596,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_get0_param": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 24,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_load_verify_locations": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 48,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_new": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 1556,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_set_verify": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 52,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_use_PrivateKey_file": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 384,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_CTX_use_certificate_chain_file": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 40,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_accept": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 52,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_free": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 1100,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_get_error": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 576,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_get_peer_certificate": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 104,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_get_verify_result": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 24,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_new": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 1952,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_read": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 188,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_set_fd": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 140,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "SSL_write": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 188,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        },
+        "TLS_server_method": {
+          "binding": "GLOBAL",
+          "defined": true,
+          "size": 12,
+          "type": "FUNC",
+          "visibility": "DEFAULT"
+        }
+      }
+    }
+  },
+  "schemaVersion": 1
+}

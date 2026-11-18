@@ -4,7 +4,7 @@
  * resolve_elf32/64_symbol walk an in-memory ELF image's PT_DYNAMIC to find a
  * symbol by name, returning load_bias + st_value. They have no target-I/O
  * dependency, so they can be unit-tested on the host against a real linker
- * image with no device and no ptrace (native-payload: runtime ELF symbol
+ * image with no device and no ptrace (injector-linker-reconstruction: runtime ELF symbol
  * resolution).
  *
  * ELF types are defined inline (not via <linux/elf.h>) so the parser compiles
@@ -126,6 +126,15 @@ typedef struct {
 #define DT_SYMENT  11
 
 #define SHN_UNDEF  0
+#define PT_LOAD    1
+#define PF_X       1
+
+struct vbi_load_mapping {
+    uint64_t start;
+    uint64_t end;
+    uint64_t file_offset;
+    int executable;
+};
 
 /* Resolve `name` in a 64-bit ELF image. Returns load_bias + st_value, or 0. */
 u64 resolve_elf64_symbol(const u8 *image, size_t image_sz, u64 load_bias,
@@ -134,5 +143,18 @@ u64 resolve_elf64_symbol(const u8 *image, size_t image_sz, u64 load_bias,
 /* Resolve `name` in a 32-bit ELF image. Returns load_bias + st_value, or 0. */
 u64 resolve_elf32_symbol(const u8 *image, size_t image_sz, u64 load_bias,
                          const char *name);
+
+/* Derive ET_DYN load bias from PT_LOAD file offsets and live mappings. */
+int vbi_compute_load_bias64(const u8 *image, size_t image_sz,
+                            const struct vbi_load_mapping *mappings,
+                            size_t mapping_count, u64 *load_bias);
+int vbi_compute_load_bias32(const u8 *image, size_t image_sz,
+                            const struct vbi_load_mapping *mappings,
+                            size_t mapping_count, u64 *load_bias);
+
+/* -1 unavailable/malformed, 0 admitted, 1 allocator/mutex boundary deferred.
+ * Uses target-file symbol ranges; stripped .symtab falls back to .dynsym. */
+int vbi_elf_libc_entry_busy(const u8 *image, size_t size, int bitness,
+                            u64 bias, u64 pc, u64 lr);
 
 #endif /* VOBOOST_INJECT_ELF_PARSE_H */

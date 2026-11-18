@@ -1,478 +1,1078 @@
-// main.rs — daemon entry point.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod i18n_resources;
+mod icon_quiescence;
+pub mod launcher_config;
+mod launcher_page;
+mod loader_quarantine;
+// Injection host entry point.
 //
-// The new Rust daemon. For Wave 1.1 (injection-control) this wires up the
-// shared modules and the injection/reconcile/process-watcher/safety logic.
-// The full lifecycle (state machine, SIGTERM handling, boot trigger) is
-// completed in Wave 1.2 (daemon-lifecycle).
+// Verifies agent artifacts and manages generations, target discovery, injection
+// and bounded shutdown. The resident daemon owns state, configuration and file logs.
 
-pub mod boot;
+pub mod agent_events;
+pub mod agent_log;
+pub mod agent_state;
+pub mod bootstrap_pipe;
+mod bootstrap_worker;
+pub mod canonical_log;
+pub mod catalog;
+pub mod cluster_control;
+#[path = "../../uninstall/src/cluster_recovery.rs"]
+mod cluster_recovery_snapshot;
 pub mod config;
 pub mod control_plane;
+pub mod downlink;
+mod emulator_diagnostic;
+mod install_acceptance;
+mod log_archive;
+mod log_export;
+mod native_commands;
+mod owned_intent;
+mod owner_client;
+#[cfg(test)]
+#[path = "owner/cluster.rs"]
+mod owner_cluster;
+#[path = "owner/io.rs"]
+mod owner_io;
+#[path = "owner/peer.rs"]
+#[cfg(not(test))]
+mod owner_peer;
+pub use voboost_shared::fixed_process;
+pub mod generation;
+mod generation_layout;
+mod injection_jobs;
 pub mod injector;
+mod installed_product;
+mod lifecycle;
 pub mod log;
-pub mod manifest;
-pub mod ota;
+mod management;
+pub mod ota_transport;
+mod package_execution;
+mod transition_log;
+pub use voboost_contract::generation as generation_contract;
+pub use voboost_contract::operation as operation_contract;
+pub use voboost_shared::installed_apk;
+mod native_binary;
+pub use voboost_shared::native_executable_signature;
+#[cfg(test)]
+pub mod oem_test_driver;
+pub mod pidfile;
 pub mod plan;
+mod process_restart;
 pub mod process_watcher;
+mod product_candidate;
+pub mod profile;
 pub mod reconcile;
-pub mod release_manifest;
+mod resident_recovery;
+mod runtime;
+mod runtime_loop;
 pub mod safety;
+pub use voboost_shared::secure_fs;
+pub mod selection;
+mod selinux_backend;
+mod startup;
+mod startup_preparation;
+mod startup_session;
+mod state;
 pub mod status;
+pub mod strict_json;
+pub mod target_identity;
 pub mod trust;
+pub mod uninstall;
+pub mod version;
 
-pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
+use runtime::{generation_prune_is_safe, retained_process_index, DaemonLoop};
 
-fn main() {
-    log::init();
-    log::info(
-        "main",
-        &format!("voboost-inject {DAEMON_VERSION} starting (new stack)"),
-    );
+fn uninstall_preempts_new_work(request: bool, prepared: bool) -> bool {
+    request || prepared
+}
 
-    // --- Single-instance via pidfile + flock ---
-    if !acquire_single_instance() {
-        log::err("main", "another instance holds the pidfile lock");
-        std::process::exit(1);
-    }
+#[derive(Debug, Eq, PartialEq)]
+enum PrepareUninstallOutcome {
+    Committed,
+    PendingOperation,
+    PendingCluster,
+    Rejected(String),
+    RolledBack(String),
+}
 
-    // --- Startup gate ---
-    if !startup_permitted() {
-        log::info("main", "startup intent is none: gated exit");
-        release_lock();
-        std::process::exit(0);
-    }
+fn preparation_resolved(result: &Result<PrepareUninstallOutcome, String>) -> bool {
+    matches!(
+        result,
+        Ok(PrepareUninstallOutcome::Committed
+            | PrepareUninstallOutcome::RolledBack(_)
+            | PrepareUninstallOutcome::Rejected(_))
+    )
+}
 
-    // --- Verify self (manifest sig + agent sha256) ---
-    // Boot recovery: restore manifest.json from .prev if the active copy is
-    // absent or fails verification after a power-loss-interrupted swap. Runs
-    // before VERIFY_SELF so a recoverable swap does not cause a DEGRADED start.
-    if ota::recover_manifest() {
-        log::ok("main", "manifest recovered; re-verifying");
-    }
-    let manifest = match verify_self() {
-        Some(m) => m,
-        None => {
-            log::err("main", "DEGRADED: self-verification failed");
-            // Degraded-restart rollback: if a switch-pending marker is present
-            // (a self-replace was committed but this restart is DEGRADED), roll
-            // back to the previous ELF + payload and self-shut down so init
-            // restarts the previous binary (ota "Degraded restart rolls back").
-            if ota::inject_switch_pending() {
-                log::info("main", "switch-pending: rolling back inject switch");
-                if ota::rollback_inject_switch() {
-                    release_lock();
-                    std::process::exit(0);
-                }
-                log::err("main", "rollback failed; staying DEGRADED");
-            }
-            write_degraded_status();
-            run_degraded_loop();
-            return;
+fn preparation_retry_delay(
+    result: &Result<PrepareUninstallOutcome, String>,
+    published: bool,
+) -> Option<std::time::Duration> {
+    match result {
+        Ok(PrepareUninstallOutcome::PendingCluster) | Err(_) => {
+            Some(std::time::Duration::from_secs(1))
         }
-    };
-    log::ok("main", &format!("READY ({} agents)", manifest.agents.len()));
-
-    // Ready-restart confirm: a switch-pending marker present at a READY restart
-    // means the new ELF launched successfully — confirm the switch (clear the
-    // marker, drop the .prev rollback targets). ota "Ready restart confirms".
-    if ota::inject_switch_pending() {
-        log::ok("main", "switch confirmed (ready restart)");
-        ota::confirm_inject_switch();
-    }
-
-    // Apply a staged inject update after VERIFY_SELF and before the first
-    // injection, so the first injection uses the new ELF + payload (ota spec).
-    let staging = config::staging_dir();
-    if ota::inject_update_ready(&staging) {
-        log::info("main", "staged inject update ready; applying");
-        // Load the verified release manifest: it is the authority for the
-        // payload files' sha256 (re-verified inside apply_inject_update).
-        let rm = release_manifest::ReleaseManifest::load();
-        match ota::apply_inject_update(&staging, rm.as_ref()) {
-            ota::InjectApplyOutcome::Applied => {
-                log::ok("main", "inject update applied; self-shutdown for restart");
-                release_lock();
-                std::process::exit(0);
-            }
-            outcome => {
-                log::err(
-                    "main",
-                    &format!(
-                        "inject update rejected ({:?}); \
-                         continuing with current ELF + payload",
-                        outcome
-                    ),
-                );
-            }
+        Ok(PrepareUninstallOutcome::RolledBack(_) | PrepareUninstallOutcome::Rejected(_))
+            if !published =>
+        {
+            Some(std::time::Duration::from_secs(1))
         }
-    }
-
-    // --- Run the daemon loop ---
-    run_daemon(manifest);
-}
-
-/// Acquire single-instance lock via pidfile + flock.
-fn acquire_single_instance() -> bool {
-    use std::fs::{self, OpenOptions};
-    use std::os::unix::fs::PermissionsExt;
-
-    let run_dir = config::RUN_DIR;
-    let _ = fs::create_dir_all(run_dir);
-    let _ = fs::set_permissions(run_dir, fs::Permissions::from_mode(0o700));
-
-    let pidfile = config::pidfile();
-    let file = match OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&pidfile)
-    {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
-    use std::os::unix::io::AsRawFd;
-    let fd = file.as_raw_fd();
-    // LOCK_EX | LOCK_NB = 2 | 4
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        return false;
-    }
-
-    // Write our pid (informational — the lock is the real guard).
-    let _ = fs::write(&pidfile, format!("{}\n", std::process::id()));
-
-    // Keep the file handle alive for the process lifetime.
-    // Leak it intentionally — the lock must persist until exit.
-    std::mem::forget(file);
-    true
-}
-
-fn release_lock() {
-    // The flock is released automatically when the process exits.
-    // The pidfile is left on disk (informational).
-}
-
-/// Startup gate: read inject.json `startup` field.
-fn startup_permitted() -> bool {
-    let path = config::plan_file();
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return true; // absent → permitted
-    };
-    if content.len() > config::MAX_PLAN_BYTES {
-        return true; // oversized → permitted (fail-safe)
-    }
-    let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&content) else {
-        return true; // malformed → permitted
-    };
-    let startup = v.get("startup").and_then(|s| s.as_str()).unwrap_or("");
-    !startup.eq_ignore_ascii_case("none")
-}
-
-/// The on-disk path of a manifest agent's file. Agent files (e.g.
-/// `agents.dex`) are deployed under the payload directory — the same
-/// directory `voboost-install` pushes them to and the implant reads them
-/// from — NOT the root zone.
-fn agent_file_path(file: &str) -> String {
-    format!("{}/{}", config::PAYLOAD_DIR, file)
-}
-
-/// VERIFY_SELF: load + verify manifest.
-fn verify_self() -> Option<manifest::Manifest> {
-    let json_bytes = std::fs::read(config::manifest_file()).ok()?;
-    let sig = std::fs::read(config::manifest_sig_file()).ok()?;
-
-    if !trust::verify_signature(&json_bytes, &sig) {
-        log::err("main", "manifest signature rejected");
-        return None;
-    }
-
-    let manifest = manifest::Manifest::parse(&json_bytes)?;
-
-    // Verify every agent sha256.
-    for agent in &manifest.agents {
-        let agent_path = agent_file_path(&agent.file);
-        if !trust::verify_agent(&agent_path, &agent.sha256) {
-            log::err("main", &format!("sha256 mismatch: {}", agent.id));
-            return None;
-        }
-    }
-
-    Some(manifest)
-}
-
-fn write_degraded_status() {
-    let mut status = status::Status::default();
-    status.daemon_version = DAEMON_VERSION.to_string();
-    status.daemon_state = "degraded".to_string();
-    status.write_atomic();
-}
-
-/// Verify the native payload for `abi` against the release manifest before
-/// injecting it into `process` (trust-verification). Returns true when the
-/// payload is verified and injection may proceed; false (fail-closed) when the
-/// manifest is absent, a required payload file is missing, or a hash mismatches.
-fn verify_payload_before_inject(
-    release_manifest: &Option<release_manifest::ReleaseManifest>,
-    abi: &str,
-    process: &str,
-) -> bool {
-    let Some(rm) = release_manifest else {
-        log::err(
-            "main",
-            "release-manifest absent: payload unverified, skip inject",
-        );
-        return false;
-    };
-    match release_manifest::verify_payload_for_abi(rm, abi) {
-        release_manifest::PayloadVerify::Ok => true,
-        release_manifest::PayloadVerify::MissingFromManifest(name) => {
-            log::err(
-                "main",
-                &format!(
-                    "payload {name} missing for {abi} in release-manifest; \
-                     skip {process}"
-                ),
-            );
-            false
-        }
-        release_manifest::PayloadVerify::HashMismatch(name) => {
-            log::err(
-                "main",
-                &format!(
-                    "payload {name} sha256 mismatch for {abi}; \
-                     skip {process}"
-                ),
-            );
-            false
-        }
+        _ => None,
     }
 }
 
-/// Run the daemon loop: poll /proc, reconcile, inject, monitor.
-///
-/// daemon-lifecycle: runs on the main thread (blocking poll). SIGTERM is
-/// caught by a signal handler that sets a shutdown flag — the poll loop
-/// checks it each iteration and exits cleanly WITHOUT tearing down hooks
-/// (injected code outlives the daemon).
-fn run_daemon(manifest: manifest::Manifest) {
-    let mut safety = safety::Safety::new();
-    let mut watcher = process_watcher::ProcessWatcher::new();
-    let boot_state = boot::BootState::new();
-    let mut status = status::Status::default();
-    status.daemon_version = DAEMON_VERSION.to_string();
-    status.daemon_state = "ready".to_string();
-    status.manifest_version = manifest.manifest_version;
-
-    // Install SIGTERM handler — sets the shutdown flag, does NOT kill hooks.
-    install_sigterm_handler();
-
-    log::ok(
-        "main",
-        "daemon loop started (ptrace injection, /proc polling)",
-    );
-    status.write_atomic();
-
-    // Poll loop. The first iteration discovers and injects every already-running
-    // target (the tracker starts empty, so poll_pass reports them as appeared).
-    let poll_interval = std::time::Duration::from_secs(2);
-    loop {
-        // Check shutdown flag (set by SIGTERM handler).
-        if SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
-            log::info("main", "SIGTERM: clean shutdown (hooks left running)");
-            release_lock();
-            break;
-        }
-
-        std::thread::sleep(poll_interval);
-
-        // Reload plan (detect changes).
-        let plan = plan::read_and_validate(&manifest);
-        log::set_debug(plan.log_level == "debug");
-        safety.set_plan_disable_all(plan.disable_all);
-
-        if safety.kill_switch_active() {
-            if !status.kill_switch {
-                log::info("main", "kill-switch active; idling");
-                status.kill_switch = true;
-                status.write_atomic();
-            }
-            continue;
-        }
-        if status.kill_switch {
-            status.kill_switch = false;
-            log::info("main", "kill-switch cleared but restart required to resume");
-            status.write_atomic();
-            continue;
-        }
-
-        // Get target processes from the plan.
-        let target_processes: Vec<String> = plan
-            .group_by_process(&manifest)
-            .keys()
-            .map(|s| s.to_string())
-            .collect();
-
-        if target_processes.is_empty() {
-            continue;
-        }
-
-        // Poll for appearances and deaths.
-        let (appeared, died) = watcher.poll_pass(&target_processes);
-
-        // Record deaths.
-        for (_pid, process) in &died {
-            safety.note_target_death();
-            safety.note_target_crash(process);
-        }
-        if safety.panic_quarantined() && !status.panic_quarantine {
-            status.panic_quarantine = true;
-            log::err("main", "panic-quarantine active");
-        }
-
-        // Check boot completion for boot-deferred agents.
-        let boot_done = boot_state.boot_completed();
-
-        // Inject new appearances.
-        // Load the release manifest once per pass: it is the trust anchor for
-        // the native payload (trust-verification). A missing/unverified manifest
-        // is fail-closed — no payload may be injected without an integrity check.
-        let release_manifest = release_manifest::ReleaseManifest::load();
-
-        for (process, pid) in &appeared {
-            // Skip degraded targets.
-            if safety.is_target_degraded(process) {
-                status.set_injection("", process, status::InjectionState::Degraded);
-                continue;
-            }
-
-            // Reconcile: already injected?
-            if reconcile::is_injected(*pid) {
-                log::debug(
-                    "main",
-                    &format!("reconcile: {process} pid={pid} already injected"),
-                );
-                continue;
-            }
-
-            // Foreign coexistence skip.
-            if reconcile::has_foreign_footprint(*pid) {
-                log::info("main", &format!("coexistence skip: {process} pid={pid}"));
-                status.set_injection("", process, status::InjectionState::SkippedCoexist);
-                continue;
-            }
-
-            // Boot-readiness gate: agents with boot:true wait for boot_completed.
-            if !boot_done {
-                // Check if this process has any boot-deferred agents.
-                let has_boot_agents = manifest
-                    .agents
-                    .iter()
-                    .any(|a| a.process == *process && a.requires_boot);
-                if has_boot_agents {
-                    log::debug(
-                        "main",
-                        &format!("boot-deferred: {process} pid={pid} waiting"),
-                    );
-                    status.set_injection("", process, status::InjectionState::Waiting);
-                    continue;
-                }
-            }
-
-            // Detect bitness → select ABI.
-            let Some(abi) = reconcile::detect_bitness(*pid) else {
-                log::err(
-                    "main",
-                    &format!("bitness detection failed: {process} pid={pid}"),
-                );
-                status.set_injection("", process, status::InjectionState::Failed);
-                continue;
-            };
-
-            // Inject.
-            // First, write the per-process config to channel B (all enabled
-            // agents mapped to this process).
-            let config_json = plan.config_for_process(process, &manifest);
-            let _ = control_plane::write_config(process, &config_json);
-            let config_path = control_plane::config_file_for(process)
-                .to_string_lossy()
-                .into_owned();
-
-            // Verify the native payload's sha256 against the verified release
-            // manifest before injecting (trust-verification). Fail-closed: a
-            // missing manifest or any payload mismatch refuses the injection.
-            if !verify_payload_before_inject(&release_manifest, abi, process) {
-                safety.note_failure("", process);
-                status.set_injection("", process, status::InjectionState::Failed);
-                continue;
-            }
-
-            let result = injector::inject(*pid, abi, &config_path);
-            match result {
-                injector::InjectResult::Ok => {
-                    watcher.tracker_mut().track(process, *pid);
-                    safety.note_success("", process);
-                    status.set_injection("", process, status::InjectionState::Active);
-                }
-                _ => {
-                    safety.note_failure("", process);
-                    safety.note_target_crash(process);
-                    status.set_injection("", process, status::InjectionState::Failed);
-                }
-            }
-        }
-
-        // Aggregate per-process agent statuses from channel B into status.
-        let tracked = watcher.tracker().tracked_targets();
-        control_plane::aggregate_agent_statuses(&mut status, &tracked);
-
-        status.write_atomic();
-    }
-}
-
-/// Global shutdown flag, set by the SIGTERM handler.
-static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Install a SIGTERM handler that sets the shutdown flag.
-/// The poll loop checks it each iteration and exits cleanly.
-/// SIGTERM does NOT tear down hooks — injected code outlives the daemon.
-extern "C" fn handle_sigterm(_sig: i32) {
-    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn install_sigterm_handler() {
-    unsafe {
-        let handler: extern "C" fn(i32) = handle_sigterm;
-        libc::signal(libc::SIGTERM, handler as usize as libc::sighandler_t);
-    }
-}
-
-/// Run in degraded mode (observe-only, inject nothing).
-fn run_degraded_loop() {
-    log::info("main", "running in DEGRADED mode (observe-only)");
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(30));
+fn preparation_error_outcome(error: String) -> PrepareUninstallOutcome {
+    if error == uninstall::PREPARATION_OPERATION_BUSY {
+        PrepareUninstallOutcome::PendingOperation
+    } else if error == cluster_control::UNINSTALL_PENDING {
+        PrepareUninstallOutcome::PendingCluster
+    } else if let Some(reason) = error.strip_prefix(cluster_control::UNINSTALL_FAILED) {
+        PrepareUninstallOutcome::Rejected(reason.into())
+    } else {
+        PrepareUninstallOutcome::RolledBack(error)
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod pending_cluster_uninstall_tests {
     use super::*;
 
-    // Regression guard for the ROOT_ZONE/PAYLOAD_DIR mix-up: agent files
-    // (agents.dex) are deployed under the payload directory, not the root
-    // zone, and verify_self's sha256 check must resolve them there.
     #[test]
-    fn agent_file_path_resolves_under_payload_dir() {
-        assert_eq!(
-            agent_file_path("agents.dex"),
-            format!("{}/agents.dex", config::PAYLOAD_DIR)
+    fn terminal_cluster_failure_is_definitive_only_after_publication() {
+        let outcome = preparation_error_outcome(format!(
+            "{}local receipt unavailable",
+            cluster_control::UNINSTALL_FAILED
+        ));
+        assert!(
+            matches!(&outcome, PrepareUninstallOutcome::Rejected(reason) if reason == "local receipt unavailable")
         );
-        assert!(agent_file_path("agents.dex").starts_with(config::PAYLOAD_DIR));
-        assert_ne!(
-            agent_file_path("agents.dex"),
-            format!("{}/agents.dex", config::ROOT_ZONE)
+        let result = Ok(outcome);
+        assert!(preparation_resolved(&result));
+        assert!(preparation_retry_delay(&result, false).is_some());
+        assert!(preparation_retry_delay(&result, true).is_none());
+    }
+
+    #[test]
+    fn failed_publication_and_recovery_are_paced_without_consuming_request() {
+        let rollback = Ok(PrepareUninstallOutcome::RolledBack("failure".into()));
+        assert!(preparation_resolved(&rollback));
+        assert!(preparation_retry_delay(&rollback, false).is_some());
+        assert!(preparation_retry_delay(&rollback, true).is_none());
+        let recovery_failure = Err("recovery failed".into());
+        assert!(!preparation_resolved(&recovery_failure));
+        assert!(preparation_retry_delay(&recovery_failure, false).is_some());
+        assert!(preparation_retry_delay(&Ok(PrepareUninstallOutcome::Committed), true).is_none());
+    }
+
+    #[test]
+    fn asynchronous_cluster_prepare_retains_request_until_completion() {
+        let pending = preparation_error_outcome(cluster_control::UNINSTALL_PENDING.into());
+        assert_eq!(pending, PrepareUninstallOutcome::PendingCluster);
+        assert!(!preparation_resolved(&Ok(pending)));
+        // A signed completion makes the next preparation commit eligible;
+        // only that terminal result consumes the original Settings request.
+        assert!(preparation_resolved(&Ok(
+            PrepareUninstallOutcome::Committed
+        )));
+        assert!(matches!(
+            preparation_error_outcome("invalid signature".into()),
+            PrepareUninstallOutcome::RolledBack(_)
+        ));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UninstallPollDisposition {
+    RetryCommitted,
+    PrepareRequested,
+    ContinueNormal,
+}
+
+fn uninstall_poll_disposition(
+    in_memory_frozen: bool,
+    prepared_marker: bool,
+    request: bool,
+) -> UninstallPollDisposition {
+    if in_memory_frozen || prepared_marker {
+        UninstallPollDisposition::RetryCommitted
+    } else if request {
+        UninstallPollDisposition::PrepareRequested
+    } else {
+        UninstallPollDisposition::ContinueNormal
+    }
+}
+
+fn consume_completed_uninstall_request() {
+    if let Err(error) = uninstall::consume_request() {
+        log::err(
+            "main",
+            &format!("uninstall request consumption failed: {error}"),
         );
     }
 }
+
+fn initialize_daemon_authorities(
+    acquire: impl FnOnce() -> Result<(), String>,
+    initialize_log: impl FnOnce(),
+) -> Result<(), String> {
+    acquire()?;
+    initialize_log();
+    Ok(())
+}
+
+fn installer_owned_install_handoff_pending(
+    operation: Option<&operation_contract::OperationDescriptor>,
+) -> bool {
+    operation.is_some_and(|operation| {
+        let installer_owned_phase = matches!(
+            (
+                operation.phase.as_str(),
+                operation.outcome.as_str(),
+                operation.reboot_count
+            ),
+            ("install-reboot-first", "reboot-required", 1)
+                | ("install-reboot-second", "reboot-required", 2)
+                | ("install-runtime-verify", "running", 2)
+                | ("install-inventory-commit", "running", 2)
+                | ("install-cleanup", "running", 2)
+        );
+        operation.operation == operation_contract::Operation::Install
+            && installer_owned_phase
+            && operation.error.is_none()
+            && operation.installed_apk.is_none()
+    })
+}
+
+enum InstallerHandoffObservation {
+    Running,
+    Busy,
+    Pending,
+    Ready,
+}
+
+fn wait_for_installer_owned_handoff_with(
+    mut pending: impl FnMut() -> Result<InstallerHandoffObservation, String>,
+    mut request_installer: impl FnMut() -> Result<(), String>,
+    mut wait: impl FnMut(std::time::Duration),
+) -> Result<usize, String> {
+    let mut observations = crate::transition_log::Transitions::default();
+    let mut attempts = 0_usize;
+    let mut starts = 0_usize;
+    let mut elapsed = std::time::Duration::ZERO;
+    let mut next_start = std::time::Duration::ZERO;
+    let mut start_backoff = std::time::Duration::from_secs(1);
+    let mut delay = std::time::Duration::from_millis(50);
+    loop {
+        match pending()? {
+            InstallerHandoffObservation::Ready => {
+                observations.resolved("installer-handoff");
+                return Ok(attempts);
+            }
+            InstallerHandoffObservation::Pending if starts < 5 && elapsed >= next_start => {
+                observations.resolved("installer-handoff");
+                request_installer()?;
+                starts += 1;
+                next_start = elapsed.saturating_add(start_backoff);
+                start_backoff = start_backoff.saturating_mul(2);
+            }
+            // Exhausting the request budget never makes the installation safe.
+            // Continue observing until its durable descriptor completes or fails.
+            InstallerHandoffObservation::Pending | InstallerHandoffObservation::Running => {
+                observations.resolved("installer-handoff");
+            }
+            InstallerHandoffObservation::Busy => {
+                observations.waiting("installer-handoff", "installer", "operation busy")
+            }
+        }
+        wait(delay);
+        elapsed = elapsed.saturating_add(delay);
+        attempts += 1;
+        delay = delay
+            .saturating_mul(2)
+            .min(std::time::Duration::from_secs(1));
+    }
+}
+
+fn wait_for_installer_owned_handoff() -> Result<usize, String> {
+    wait_for_installer_owned_handoff_with(
+        || match operation_contract::observe_current_in(std::path::Path::new(config::ROOT_ZONE))? {
+            operation_contract::CurrentOperationObservation::Busy => {
+                Ok(InstallerHandoffObservation::Busy)
+            }
+            operation_contract::CurrentOperationObservation::Snapshot(snapshot) => Ok(
+                if installer_owned_install_handoff_pending(snapshot.descriptor()) {
+                    use profile::PropSource;
+                    match profile::Getprop.prop("init.svc.voboost-install").as_deref() {
+                        Some("running" | "restarting") => InstallerHandoffObservation::Running,
+                        Some("stopped") => InstallerHandoffObservation::Pending,
+                        // Missing or transient init state is not permission to start.
+                        _ => InstallerHandoffObservation::Busy,
+                    }
+                } else {
+                    InstallerHandoffObservation::Ready
+                },
+            ),
+        },
+        || fixed_process::set_property("ctl.start", "voboost-install"),
+        std::thread::sleep,
+    )
+}
+
+fn main() {
+    if let Some(code) = handle_cluster_provision_cli() {
+        std::process::exit(code);
+    }
+    if let Some(code) = launcher_page::handle_cli() {
+        std::process::exit(code);
+    }
+    if let Some(code) = install_acceptance::handle_cli() {
+        std::process::exit(code);
+    }
+    if let Some(code) = emulator_diagnostic::handle_cli() {
+        std::process::exit(code);
+    }
+    if let Some(code) = management::handle_cli() {
+        std::process::exit(code);
+    }
+    if let Some(code) = handle_reboot() {
+        std::process::exit(code);
+    }
+    if let Some(code) = injector::handle_internal_helper_cli() {
+        std::process::exit(code);
+    }
+    if std::env::args_os().len() != 1 {
+        log::err("main", "unsupported injection-host command");
+        std::process::exit(2);
+    }
+    #[cfg(not(test))]
+    if let Err(error) = owner_client::wait_ready(std::time::Duration::from_secs(5)) {
+        log::err("main", &format!("runtime owner is unavailable: {error}"));
+        std::process::exit(1);
+    }
+    // The singleton authority owns creation of /data/voboost/run. Logger
+    // initialization may publish a socket there only after the exact root:root
+    // mode-0755 directory has been created and retained by the pidfile guard.
+    if let Err(error) = initialize_daemon_authorities(acquire_single_instance, log::init) {
+        crate::log::err(
+            "main",
+            &format!("voboost-inject: pidfile authority unavailable: {error}"),
+        );
+        std::process::exit(1);
+    }
+    if let Some(code) = handle_generation_cli() {
+        std::process::exit(code);
+    }
+    log::info("main", "voboost-inject starting");
+
+    // A durable prepared uninstall is the irreversible commit boundary. It
+    // preempts product and generation recovery, so no queued activation can
+    // run after that commit.
+    if uninstall::prepared_marker_valid() {
+        let generation_store = generation::GenerationStore::production();
+        if let Err(error) = uninstall::consume_request() {
+            log::err(
+                "main",
+                &format!("prepared uninstall request consumption failed: {error}"),
+            );
+        }
+        if let Err(error) = uninstall::retry_committed_prepared(&generation_store) {
+            log::err(
+                "main",
+                &format!("prepared uninstall freeze/trigger retry failed: {error}"),
+            );
+        }
+        lifecycle::run_uninstall_frozen_loop();
+        return;
+    }
+
+    // Product recovery runs before generation validation and any new
+    // app-authored work. It is the only native/product update authority.
+    let _ = std::fs::create_dir_all(config::ROOT_ZONE);
+    let product_recovery =
+        product_candidate::ProductCandidateStore::production().recover_product_activation();
+    match lifecycle::startup_product_recovery_disposition(&product_recovery) {
+        lifecycle::StartupProductRecoveryDisposition::Continue => {
+            if matches!(
+                product_recovery,
+                Ok(Some(product_candidate::Admission::Accepted))
+            ) {
+                log::ok("main", "recovered product update activation");
+            }
+        }
+        lifecycle::StartupProductRecoveryDisposition::RebootRequired => {
+            log::ok("main", "product update requires an init-owned reboot");
+            if lifecycle::request_reboot() {
+                release_lock();
+                std::process::exit(0);
+            }
+            write_degraded_status();
+            lifecycle::run_product_recovery_degraded_loop();
+            return;
+        }
+        lifecycle::StartupProductRecoveryDisposition::ProductDegraded => {
+            let error = product_recovery
+                .expect_err("product degraded startup disposition requires an error");
+            log::err(
+                "main",
+                &format!("product update activation recovery failed: {error}"),
+            );
+            write_degraded_status();
+            lifecycle::run_product_recovery_degraded_loop();
+            return;
+        }
+    }
+    let generation_store = generation::GenerationStore::production();
+    match wait_for_installer_owned_handoff() {
+        Ok(0) => {}
+        Ok(attempts) => log::ok(
+            "main",
+            &format!("installer-owned handoff completed after {attempts} retries"),
+        ),
+        Err(error) => {
+            log::err(
+                "main",
+                &format!("install generation handoff failed: {error}"),
+            );
+            write_degraded_status();
+            lifecycle::run_degraded_loop();
+            return;
+        }
+    }
+    if !generation_store.activation_kill_switch_active() {
+        match generation_store.recover_activation() {
+            Ok(Some(recovered)) => log::ok(
+                "main",
+                &format!(
+                    "recovered and verified generation activation: {}",
+                    recovered.id
+                ),
+            ),
+            Ok(None) => {}
+            Err(error) => {
+                log::err(
+                    "main",
+                    &format!("generation activation recovery failed: {error:#}"),
+                );
+                write_degraded_status();
+                lifecycle::run_degraded_loop();
+                return;
+            }
+        }
+    }
+    let uninstall_requested = uninstall::request_present();
+    if !uninstall_preempts_new_work(uninstall_requested, false) {
+        // Read the installed vehicle profile only when normal activation work is
+        // allowed. Activation recomputes applicability from root-owned facts.
+        if let Err(error) = profile::ensure_vehicle_profile(std::path::Path::new(config::ROOT_ZONE))
+        {
+            log::err(
+                "main",
+                &format!("vehicle profile resolution failed: {error}"),
+            );
+        }
+        activate_incoming_if_ready(&generation_store);
+    }
+
+    let generation = match generation_store.active() {
+        Ok(generation) => generation,
+        Err(error) => {
+            log::err(
+                "main",
+                &format!("DEGRADED: active generation invalid: {error}"),
+            );
+            write_degraded_status();
+            lifecycle::run_degraded_loop();
+            return;
+        }
+    };
+    let product_identity = match installed_product::load_identity() {
+        Ok(identity) => identity,
+        Err(error) => {
+            log::err(
+                "main",
+                &format!("DEGRADED: active product identity invalid: {error}"),
+            );
+            write_degraded_status();
+            lifecycle::run_degraded_loop();
+            return;
+        }
+    };
+    if uninstall_requested {
+        let mut daemon_loop = DaemonLoop::new_with_product_identity(
+            generation.clone(),
+            true,
+            product_identity.clone(),
+        );
+        match daemon_loop.prepare_uninstall(&generation_store) {
+            Ok(PrepareUninstallOutcome::Committed) => {
+                consume_completed_uninstall_request();
+                lifecycle::run_uninstall_frozen_loop();
+            }
+            Ok(
+                PrepareUninstallOutcome::PendingOperation | PrepareUninstallOutcome::PendingCluster,
+            ) => {
+                // Retain exact request and authority; the ordinary daemon poll
+                // retries with its existing pacing after publisher flush.
+                lifecycle::run_daemon(generation, false, product_identity);
+            }
+            Ok(
+                outcome @ (PrepareUninstallOutcome::RolledBack(_)
+                | PrepareUninstallOutcome::Rejected(_)),
+            ) => {
+                let (error, publication) = match outcome {
+                    PrepareUninstallOutcome::RolledBack(error) => {
+                        let result = uninstall::record_rolled_back_result(&error);
+                        (error, result)
+                    }
+                    PrepareUninstallOutcome::Rejected(error) => {
+                        let result = uninstall::record_rejected_result(&error);
+                        (error, result)
+                    }
+                    _ => unreachable!(),
+                };
+                match publication {
+                    Ok(()) => consume_completed_uninstall_request(),
+                    Err(reply_error) => log::err(
+                        "uninstall",
+                        &format!("preparation result unavailable; request retained: {reply_error}"),
+                    ),
+                }
+                uninstall::record_failure(&error);
+                log::err("main", &format!("uninstall preparation failed: {error}"));
+                lifecycle::run_daemon(generation, false, product_identity);
+            }
+            Err(error) => {
+                // Neither durable commit nor complete rollback was proved. Keep
+                // the request for a bounded retry and fence activation work.
+                uninstall::record_failure(&error);
+                log::err(
+                    "main",
+                    &format!("uninstall prepare recovery failed: {error}"),
+                );
+                lifecycle::run_daemon(generation, false, product_identity);
+            }
+        }
+        return;
+    }
+    log::ok(
+        "main",
+        &format!(
+            "READY generation={} ({} installed agents)",
+            generation.id,
+            generation.selection.selected_agent_ids.len()
+        ),
+    );
+
+    // After a daemon restart the in-memory resident registry is empty while
+    // OEM processes may still hold DEX from an older immutable generation.
+    // Prune only when every live catalog process supplied a verified resident
+    // identity; otherwise conservatively retain all generations.
+    match generation_store.retained_generations() {
+        Ok(retained) => {
+            let live_processes = retained_process_index(&retained)
+                .into_keys()
+                .filter(|process| {
+                    retained.iter().any(|generation| {
+                        process_watcher::find_pid_in_generation(generation, process).is_some()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let resident_generations = live_processes
+                .iter()
+                .filter_map(|process| control_plane::resident_generation_id(process))
+                .collect::<std::collections::BTreeSet<_>>();
+            if generation_prune_is_safe(live_processes.len(), resident_generations.len()) {
+                match generation_store.prune(&resident_generations) {
+                    Ok(removed) if !removed.is_empty() => log::info(
+                        "main",
+                        &format!("generation GC removed: {}", removed.join(",")),
+                    ),
+                    Ok(_) => {}
+                    Err(error) => log::err("main", &format!("generation GC deferred: {error}")),
+                }
+            } else {
+                log::info(
+                    "main",
+                    "generation GC deferred: retained-generation resident identity is unavailable after restart",
+                );
+            }
+        }
+        Err(error) => log::err(
+            "main",
+            &format!("generation GC deferred: retained generation verification failed: {error}"),
+        ),
+    }
+
+    // --- Run the daemon loop ---
+    lifecycle::run_daemon(generation, false, product_identity);
+}
+
+fn handle_reboot() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.as_slice() != ["--reboot"] {
+        return None;
+    }
+    let stable_self = std::env::current_exe()
+        .ok()
+        .is_some_and(|path| path == std::path::Path::new("/data/voboost/voboost-inject"));
+    // Android init is the fixed PID-1 service owner. Avoid accepting a shell
+    // or resident-daemon child even when it can execute the same signed ELF.
+    let init_parent = unsafe { libc::getppid() } == 1;
+    if unsafe { libc::geteuid() } != 0 || !stable_self || !init_parent {
+        return Some(126);
+    }
+    if !matches!(product_candidate::authorize_reboot(), Ok(true)) {
+        return Some(125);
+    }
+    Some(if lifecycle::perform_reboot() { 0 } else { 12 })
+}
+
+/// Activation entry shared by startup and the runtime incoming watcher.
+///
+/// When the `ready` marker is present, run the same activation
+/// path as startup activation: verify + import + atomic pointer switch. New
+/// processes use the new generation while residents keep their current code;
+/// identical re-activation is a logged no-op. A failed validation CONSUMES the staged
+/// transaction: the staging tree is quarantined under `rejected/` with the
+/// rejection reason so neither this call nor the 500ms watcher retries the
+/// same content forever.
+fn activate_incoming_if_ready(store: &generation::GenerationStore) {
+    activate_incoming_once(store);
+}
+
+/// Runtime watcher variant that hands the freshly activated generation back
+/// so the live DaemonLoop can cut over to it (new processes must bootstrap
+/// the new `current`; residents keep their old generation (docs/developer/updates).
+fn activate_incoming_for_loop(
+    store: &generation::GenerationStore,
+) -> Option<generation::VerifiedGeneration> {
+    if !store.incoming_work_present() {
+        store.observe_log_resolved("incoming-rejection");
+        store.observe_log_resolved("initial-generation");
+        return None;
+    }
+    if store.activation_kill_switch_active() {
+        return None;
+    }
+    let recovery = store.recover_rejection();
+    store.observe_log_result("incoming-rejection", &recovery);
+    if recovery.is_err() {
+        return None;
+    }
+    match store.prepare_initial_install() {
+        Ok(generation::InitialInstallPreparation::Busy) => {
+            store.observe_log_wait("initial-generation", "operation busy");
+            return None;
+        }
+        Ok(_) => store.observe_log_resolved("initial-generation"),
+        Err(error) => {
+            store.observe_log_result::<()>("initial-generation", &Err(error));
+            return None;
+        }
+    }
+    let incoming_marker = store.incoming_marker();
+    if !incoming_marker.exists() {
+        return None;
+    }
+    match store.activate_incoming() {
+        Ok(generation) => {
+            log::ok(
+                "main",
+                &format!("incoming generation activated: {}", generation.id),
+            );
+            log::info(
+                "main",
+                "generation switch is passive; resident processes keep their current code until a natural restart",
+            );
+            Some(generation)
+        }
+        Err(error) => {
+            log::err("main", &format!("incoming generation rejected: {error:#}"));
+            if store.activation_kill_switch_active() {
+                log::info(
+                    "main",
+                    "kill-switch blocked generation activation; staging retained",
+                );
+                return None;
+            }
+            if store.accepted_activation_pending_cleanup() {
+                log::err(
+                    "main",
+                    "accepted generation cleanup deferred; staging retained for recovery",
+                );
+                return None;
+            }
+            // Consume the transaction exactly like the startup path: without
+            // the quarantine a bad generation staged after daemon start
+            // would be fully re-verified every 500ms forever. If the
+            // quarantine itself fails the marker stays, but the next pass
+            // retries the quarantine — bounded work per pass, and the reason
+            // is logged each time.
+            match store.reject_incoming(&error.to_string()) {
+                Ok(quarantined) => {
+                    log::err(
+                        "main",
+                        &format!(
+                            "rejected staging consumed and quarantined at {}",
+                            quarantined.path.display()
+                        ),
+                    );
+                }
+                Err(quarantine_error) => log::err(
+                    "main",
+                    &format!(
+                        "quarantining rejected staging failed ({quarantine_error}); \
+                         marker left in place"
+                    ),
+                ),
+            }
+            None
+        }
+    }
+}
+
+/// One watcher/startup pass over the incoming marker. Returns true when an
+/// activation attempt was made; activation is passive and never reboots the
+/// multimedia unit or terminates resident OEM processes.
+fn activate_incoming_once(store: &generation::GenerationStore) -> bool {
+    activate_incoming_once_with_authority(store, store.activation_kill_switch_active())
+}
+
+fn activate_incoming_once_with_authority(
+    store: &generation::GenerationStore,
+    kill_switch_active: bool,
+) -> bool {
+    if kill_switch_active {
+        return false;
+    }
+    let recovery = store.recover_rejection();
+    store.observe_log_result("incoming-rejection", &recovery);
+    if recovery.is_err() {
+        return false;
+    }
+    match store.prepare_initial_install() {
+        Ok(generation::InitialInstallPreparation::Busy) => {
+            store.observe_log_wait("initial-generation", "operation busy");
+            return false;
+        }
+        Ok(_) => store.observe_log_resolved("initial-generation"),
+        Err(error) => {
+            store.observe_log_result::<()>("initial-generation", &Err(error));
+            return false;
+        }
+    }
+    let incoming_marker = store.incoming_marker();
+    if !incoming_marker.exists() {
+        return false;
+    }
+    match store.activate_incoming() {
+        Ok(generation) => {
+            log::ok(
+                "main",
+                &format!("incoming generation activated: {}", generation.id),
+            );
+            log::info(
+                "main",
+                "generation switch is passive; resident processes keep their current code until a natural restart",
+            );
+        }
+        Err(error) => {
+            log::err("main", &format!("incoming generation rejected: {error:#}"));
+            if store.activation_kill_switch_active() {
+                log::info(
+                    "main",
+                    "kill-switch blocked generation activation; staging retained",
+                );
+                return false;
+            }
+            if store.accepted_activation_pending_cleanup() {
+                log::err(
+                    "main",
+                    "accepted generation cleanup deferred; staging retained for recovery",
+                );
+                return true;
+            }
+            match store.reject_incoming(&error.to_string()) {
+                Ok(quarantined) => {
+                    log::err(
+                        "main",
+                        &format!(
+                            "rejected staging consumed and quarantined at {}",
+                            quarantined.path.display()
+                        ),
+                    );
+                }
+                Err(quarantine_error) => log::err(
+                    "main",
+                    &format!(
+                        "quarantining rejected staging failed ({quarantine_error}); \
+                         marker left in place"
+                    ),
+                ),
+            }
+        }
+    }
+    true
+}
+
+fn handle_cluster_provision_cli() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--uninstall-protocol") {
+        if args.len() != 1 {
+            return Some(2);
+        }
+        return Some(
+            match management::authorize_stable_cli()
+                .and_then(|()| cluster_control::uninstall_bridge::uninstall_provision())
+            {
+                Ok(Some(provision)) => {
+                    println!(
+                        "device-owned-v1 cluster {} {} {}",
+                        provision.pair_id, provision.authority_epoch, provision.qnx_public_key
+                    );
+                    0
+                }
+                Ok(None) => {
+                    println!("device-owned-v1 android");
+                    0
+                }
+                Err(error) => {
+                    crate::log::err("main", &format!("uninstall protocol observation: {error}"));
+                    1
+                }
+            },
+        );
+    }
+    if args.first().map(String::as_str) == Some("--cluster-uninstall-provisional-export") {
+        if args.len() != 1 {
+            return Some(2);
+        }
+        return Some(
+            match cluster_control::uninstall_bridge::read_provisional_production() {
+                Ok(Some(bytes)) => {
+                    use std::io::Write;
+                    if std::io::stdout().lock().write_all(&bytes).is_ok() {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Ok(None) => 0,
+                Err(error) => {
+                    crate::log::err(
+                        "main",
+                        &format!("cluster provisional export rejected: {error}"),
+                    );
+                    1
+                }
+            },
+        );
+    }
+    if args.first().map(String::as_str) == Some("--cluster-uninstall-provisional") {
+        if args.len() != 2 || args[1] != "-" {
+            return Some(2);
+        }
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        let result = std::io::stdin()
+            .take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|_| cluster_control::uninstall_bridge::retain_provisional_production(&bytes));
+        return Some(match result {
+            Ok(()) => {
+                println!("{{\"schemaVersion\":1,\"retained\":true}}");
+                0
+            }
+            Err(error) => {
+                crate::log::err(
+                    "main",
+                    &format!("cluster provisional retention rejected: {error}"),
+                );
+                1
+            }
+        });
+    }
+    if args.first().map(String::as_str) == Some("--cluster-uninstall-export") {
+        if args.len() != 1 {
+            return Some(2);
+        }
+        return Some(
+            match cluster_control::uninstall_bridge::export_production() {
+                Ok(bytes) => {
+                    use std::io::Write;
+                    if std::io::stdout().lock().write_all(&bytes).is_ok() {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                Err(error) => {
+                    crate::log::err("main", &format!("cluster uninstall export failed: {error}"));
+                    1
+                }
+            },
+        );
+    }
+    if args.first().map(String::as_str) == Some("--cluster-uninstall-finalize") {
+        if args.len() != 2 || (args[1] != "-" && !std::path::Path::new(&args[1]).is_absolute()) {
+            return Some(2);
+        }
+        return Some(
+            match cluster_control::uninstall_bridge::import_production(std::path::Path::new(
+                &args[1],
+            )) {
+                Ok(()) => {
+                    println!("cluster uninstall completion accepted");
+                    0
+                }
+                Err(error) => {
+                    crate::log::err(
+                        "main",
+                        &format!("cluster uninstall completion rejected: {error}"),
+                    );
+                    1
+                }
+            },
+        );
+    }
+    if args.first().map(String::as_str) == Some("--cluster-provision") {
+        if args.len() != 2 || !std::path::Path::new(&args[1]).is_absolute() {
+            crate::log::err(
+                "main",
+                "usage: voboost-inject --cluster-provision <protected-absolute-directory>",
+            );
+            return Some(2);
+        }
+        return Some(
+            match cluster_control::provision_production(std::path::Path::new(&args[1])) {
+                Ok(()) => {
+                    println!("cluster provisioning accepted");
+                    0
+                }
+                Err(error) if error == "operation busy" => {
+                    voboost_contract::cluster_wire::PROVISION_BUSY_EXIT
+                }
+                Err(error) => {
+                    crate::log::err("main", &format!("cluster provisioning failed: {error}"));
+                    1
+                }
+            },
+        );
+    }
+    None
+}
+
+fn handle_generation_cli() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        return None;
+    }
+    if args.len() != 1 {
+        crate::log::err(
+            "main",
+            "usage: voboost-inject [--activate-incoming|--describe-active-generation|\
+             --rollback-generation|--recompute-profile]",
+        );
+        return Some(2);
+    }
+    // The audited operator diagnostic: intentionally rewrite vehicle.json
+    // from fresh root probes. Running this command IS the operator
+    // confirmation; the recompute is logged to the daemon log.
+    if args[0] == "--recompute-profile" {
+        let _ = std::fs::create_dir_all(config::ROOT_ZONE);
+        return match profile::recompute_vehicle_profile(std::path::Path::new(config::ROOT_ZONE)) {
+            Ok(document) => match profile::canonical_bytes(&document.facts) {
+                Ok(bytes) => {
+                    println!("{}", String::from_utf8_lossy(&bytes));
+                    Some(0)
+                }
+                Err(error) => {
+                    crate::log::err(
+                        "main",
+                        &format!("profile output serialization failed: {error}"),
+                    );
+                    Some(5)
+                }
+            },
+            Err(error) => {
+                crate::log::err("main", &format!("profile recompute failed: {error}"));
+                Some(5)
+            }
+        };
+    }
+    let store = generation::GenerationStore::production();
+    let result = match args[0].as_str() {
+        "--activate-incoming" | "--rollback-generation" => {
+            // These mutate generation pointers and race the daemon poll loop's
+            // prune. Acquire the same pidfile flock as the daemon startup so
+            // the CLI operation is serialized against prune. If the daemon
+            // holds the lock, refuse rather than corrupting state.
+            match acquire_single_instance() {
+                Err(error) => {
+                    crate::log::err(
+                        "main",
+                        &format!("pidfile authority unavailable: {error}; retry later"),
+                    );
+                    return Some(1);
+                }
+                Ok(()) => match args[0].as_str() {
+                    "--activate-incoming" => store.activate_incoming(),
+                    "--rollback-generation" => store.rollback(),
+                    _ => unreachable!(),
+                },
+            }
+        }
+        "--describe-active-generation" => store.active(),
+        _ => {
+            crate::log::err("main", &format!("unknown option: {}", args[0]));
+            return Some(2);
+        }
+    };
+    match result.and_then(|generation| generation.description_json()) {
+        Ok(description) => {
+            println!("{description}");
+            Some(0)
+        }
+        Err(error) => {
+            crate::log::err("main", &format!("generation operation failed: {error}"));
+            let text = error.to_string();
+            Some(
+                if text.contains("missing")
+                    || text.contains("invalid")
+                    || text.contains("mismatch")
+                    || text.contains("rejected")
+                {
+                    3
+                } else if text.contains("current pointer") || text.contains("previous pointer") {
+                    6
+                } else {
+                    5
+                },
+            )
+        }
+    }
+}
+
+/// Acquire and retain the exact root-owned pidfile authority.
+fn acquire_single_instance() -> Result<(), String> {
+    pidfile::acquire_process_lock().map_err(|error| error.to_string())
+}
+
+fn release_lock() {
+    // The typed static guard deliberately releases only at process exit.
+}
+
+fn write_degraded_status() {
+    let mut status = status::Status::default();
+    if let Ok(identity) = installed_product::load_identity() {
+        status.release_identity = identity.release_identity;
+        status.manifest_sha256 = identity.manifest_sha256;
+    }
+    status.daemon_state = "degraded".to_string();
+    status.write_atomic();
+}
+
+#[cfg(test)]
+mod tests;

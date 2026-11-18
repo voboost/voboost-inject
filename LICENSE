@@ -1,76 +1,21 @@
-PolyForm Noncommercial License 1.0.0
+MIT License
 
-<https://polyformproject.org/licenses/noncommercial/1.0.0>
+Copyright (c) 2025–2026 Voboost Team
 
-## Copyright Notice
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Copyright (c) 2025-2026 Voboost Team <license@voboost.ru>
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-Software: Voboost root injection daemon
-
-## License
-
-This software is licensed under the PolyForm Noncommercial License, version 1.0.0.
-
-The full text of the license follows.
-
----
-
-# PolyForm Noncommercial License 1.0.0
-
-<https://polyformproject.org/licenses/noncommercial/1.0.0>
-
-### About
-
-This license is designed to ensure that the licensed work will be available
-to everyone, for noncommercial use, while reserving the right to license
-the work for commercial use to others.
-
-### Terms
-
-In this license, "the software" means the software, and any related documentation,
-source code, or other files, that the license applies to.
-
-#### 1. Copyright
-
-Each contributor licenses you the copyright in their contributions to the software
-under this license.
-
-#### 2. Patent
-
-Each contributor licenses you, for their contributions, all patent claims they
-can license that relate to the software, to make, use, and distribute the software,
-as well as any patent claims they can license that can be infringed by making, using,
-or distributing their contributions to the software.
-
-#### 3. Noncommercial
-
-You may do anything with the software that the copyright and patent licenses allow,
-except use the software for any purpose that is predominantly or primarily directed
-toward commercial advantage, monetary compensation, or other commercial benefit.
-
-#### 4. Notices
-
-You must give anyone who receives the software a copy of this license, as well as
-copyright and patent notices for the software.
-
-#### 5. Changes
-
-If you change the software, you must give anyone who receives a copy of it
-notices of the changes you made.
-
-#### 6. Assumption of Risk
-
-The software is provided "as is", without warranty of any kind. Each contributor
-assumes all risk of using the software.
-
-#### 7. Exclusions
-
-Neither this license nor any contributor grants any trademark, service mark,
-or other branding rights, except as necessary to accurately describe the origin
-of the software.
-
-#### 8. Commercial Licensing
-
-For commercial use of the software, a separate commercial license is available.
-Contact license@voboost.ru for more information.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -1,0 +1,30 @@
+[package]
+name = "voboost-uninstall"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One-shot in-car uninstall binary: exact init trigger only"
+
+[[bin]]
+name = "voboost-uninstall"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Self-verification of the appended ed25519 ELF signature: voboost-uninstall runs
+# privileged at boot and must fail closed on an unsigned/replaced binary,
+# same contract as voboost-selinux.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "zeroize"] }
+# Backup-hash verification without spawning a shell: the sidecar content must
+# never be interpolated into sh -c.
+sha2 = "0.10"
+libc = "0.2"
+voboost-contract = { path = "../contract" }
+voboost-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile = "3"

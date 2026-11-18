@@ -1,39 +1,58 @@
-// config.rs — paths and constants for the voboost-inject daemon.
+// Fixed paths and bounds for the injection runtime.
 //
-// Ported 1:1 from Vala main.vala ROOT_ZONE/APP_ZONE, plus the new zone
-// path /data/voboost-inject (design §3.1).
+// The root zone is the runtime authority. The app sandbox is used only for
+// hostile network/update staging and never mirrors runtime control or status.
 
-/// Root zone — trusted, root-owned (mode 0700).
-pub const ROOT_ZONE: &str = "/data/voboost-inject";
+/// Root zone — trusted, root:root mode 0755. The app needs traversal only to
+/// its separately app-owned `generations/next` subtree.
+pub use voboost_contract::runtime_owner::ROOT_ZONE;
 
-/// App zone — untrusted, app-writable.
+/// Fixed privileged flat generation import directory.
+pub const INCOMING_DIR: &str = "/data/voboost/generations/next";
+
+/// App sandbox — untrusted, app-writable network/update staging only.
 pub const APP_ZONE: &str = "/data/user/0/ru.voboost";
 
-/// Channel-B shared directory (world-readable files, media_rw_data_file).
-pub const SHARED_DIR: &str = "/data/voboost-inject/shared";
+/// Per-key agent state directory. The owner daemon is the only writer;
+/// injection events reach it through the private bounded IPC.
+pub use voboost_contract::runtime_owner::STATE_DIR;
 
-/// Payload directory (native .so files the daemon verifies and injects).
-pub const PAYLOAD_DIR: &str = "/data/voboost-inject/payload";
+pub const IMPLANT_PATH_ARM64: &str = "/data/voboost/libimplant-arm64-v8a.so";
+pub const IMPLANT_PATH_ARM32: &str = "/data/voboost/libimplant-armeabi-v7a.so";
 
-/// Run directory (pidfile + kill-switch).
-pub const RUN_DIR: &str = "/data/voboost-inject/run";
+pub use voboost_contract::runtime_owner::INJECT_PID_NAME as PID_NAME;
+/// Root-owned mode 0755 run directory (pidfile + kill-switch). The fixed mode
+/// is part of the daemon's directory contract: the pidfile acquisition, the
+/// desktop uninstall request publication, and resident status inspection
+/// all validate it, so the three must never drift apart.
+pub use voboost_contract::runtime_owner::{RUN_DIR, RUN_DIR_MODE};
 
-/// Log directory.
-pub const LOG_DIR: &str = "/data/voboost-inject/logs";
-
-/// The app→daemon plan file (channel A input).
-pub fn plan_file() -> String {
-    format!("{APP_ZONE}/inject.json")
+pub fn pid_file() -> String {
+    format!("{RUN_DIR}/{PID_NAME}")
 }
 
-/// The daemon→app status file (channel A output).
+/// Log directory.
+pub use voboost_contract::runtime_owner::LOG_DIR;
+
+/// Canonical, root-owned user intent. The daemon is its only programmatic
+/// writer; trusted operators may still edit the strict JSON atomically.
+pub fn plan_file() -> String {
+    format!("{ROOT_ZONE}/agents.json")
+}
+
+/// Root-owned operator/installer diagnostic status.
 pub fn status_file() -> String {
-    format!("{APP_ZONE}/inject-status.json")
+    format!("{ROOT_ZONE}/status.json")
+}
+
+/// Root compatibility state file for one already-sanitized key.
+pub fn state_file(safe_key: &str) -> String {
+    format!("{STATE_DIR}/{safe_key}.json")
 }
 
 /// The pidfile (single-instance lock).
 pub fn pidfile() -> String {
-    format!("{RUN_DIR}/inject.pid")
+    format!("{RUN_DIR}/pid")
 }
 
 /// The kill-switch file.
@@ -43,62 +62,34 @@ pub fn kill_switch_file() -> String {
 
 /// Path to the per-ABI libimplant.so.
 pub fn libimplant_path(abi: &str) -> String {
-    format!("{PAYLOAD_DIR}/{abi}/libimplant.so")
+    format!("{ROOT_ZONE}/libimplant-{abi}.so")
 }
 
-/// The untrusted app-zone staging directory where the OTA client stages a
-/// verified inject update (daemon ELF + per-ABI payload) before the daemon
-/// applies it.
-pub fn staging_dir() -> String {
-    format!("{APP_ZONE}/staging")
+/// Stable app-owned directory containing root-level transaction documents and
+/// the uninstall request marker. Purpose-specific staging directories are
+/// flat siblings and may be atomically replaced independently.
+pub fn app_staging_dir() -> String {
+    APP_ZONE.to_string()
 }
 
-/// The stable launch path init execs (root zone). The inject self-update never
+/// The stable launch path init execs (root zone). Update never
 /// replaces this in place; it repoints via an atomic rename (ota spec).
 pub fn inject_binary_file() -> String {
     format!("{ROOT_ZONE}/voboost-inject")
 }
 
-/// The previous daemon binary, kept one-deep for rollback (ota spec).
-pub fn inject_prev_file() -> String {
-    format!("{ROOT_ZONE}/voboost-inject.prev")
+/// Root-owned transient update candidate transactions.
+pub fn install_transactions_dir() -> String {
+    format!("{ROOT_ZONE}/install")
 }
 
-/// The switch-pending marker, written after an inject self-replace so a
-/// DEGRADED restart can roll back (atomic-apply-rollback / ota spec).
-pub fn inject_switch_pending_marker() -> String {
-    format!("{RUN_DIR}/voboost-inject-switch-pending")
+/// Root-owned transient update rollback transactions.
+pub fn recovery_transactions_dir() -> String {
+    format!("{ROOT_ZONE}/recovery")
 }
 
-/// The producer's "a verified inject update is staged" marker (single-use,
-/// created last in the staging dir). Owned by the daemon as the consumer.
-pub fn inject_update_ready_marker(staging: &str) -> String {
-    format!("{staging}/voboost-inject-update-ready")
-}
-
-/// DoS bound for the staged inject payload (a single appended-sig ELF).
-/// 64 MiB is a generous upper bound (a typical daemon ELF is tens of MB).
-pub const MAX_INJECT_BYTES: usize = 67_108_864;
-
-/// Path to the root-zone manifest.
-pub fn manifest_file() -> String {
-    format!("{ROOT_ZONE}/manifest.json")
-}
-
-/// Path to the root-zone manifest signature.
-pub fn manifest_sig_file() -> String {
-    format!("{ROOT_ZONE}/manifest.sig")
-}
-
-/// Path to the root-zone release manifest (native-payload integrity envelope).
-pub fn release_manifest_file() -> String {
-    format!("{ROOT_ZONE}/release-manifest.json")
-}
-
-/// Path to the root-zone release manifest signature (detached ed25519).
-pub fn release_manifest_sig_file() -> String {
-    format!("{ROOT_ZONE}/release-manifest.json.sig")
-}
+/// Bound for one role-signed native executable.
+pub use voboost_contract::runtime_owner::MAX_NATIVE_EXECUTABLE_BYTES;
 
 /// Device-safety defaults (ported from Vala main.vala).
 pub const SAFETY_MAX_ATTEMPTS: u32 = 3;
@@ -114,6 +105,53 @@ pub const BREAKER_THRESHOLD_SYSTEM_SERVER: u32 = 2;
 /// Plan validation size bounds (ported from Vala plan_reader.vala).
 pub const MAX_CONFIG_BYTES: usize = 65536; // 64 KiB
 pub const MAX_PLAN_BYTES: usize = 1048576; // 1 MiB
+pub const MAX_AGENT_STATUS_BYTES: usize = 65536; // 64 KiB
+pub const MAX_AGENT_STATE_BYTES: usize = crate::state::MAX_BYTES;
+pub const MAX_AGENT_STATE_KEY_BYTES: usize = crate::state::MAX_KEY_BYTES;
+pub const MAX_AGENT_STATE_SOURCE_BYTES: usize = crate::state::MAX_SOURCE_BYTES;
+pub const MAX_AGENT_STATE_STORAGE_KEY_BYTES: usize = crate::state::MAX_STORAGE_KEY_BYTES;
+pub const MAX_AGENT_STATE_FILENAME_BYTES: usize = crate::state::MAX_FILENAME_BYTES;
+pub const MAX_AGENT_STATE_RESPONSE_BYTES: usize = 4352;
+pub const MAX_DOWNLINK_FRAME_BYTES: usize = 60 * 1024;
 
-/// The libimplant.so marker to look for in /proc/<pid>/maps.
-pub const IMPLANT_MARKER: &str = "libimplant.so";
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_file_is_root_owned() {
+        assert!(plan_file().starts_with(ROOT_ZONE));
+        assert!(plan_file().ends_with("agents.json"));
+    }
+
+    #[test]
+    fn status_file_is_root_owned() {
+        assert!(status_file().starts_with(ROOT_ZONE));
+        assert!(status_file().ends_with("status.json"));
+    }
+
+    #[test]
+    fn libimplant_path_includes_abi() {
+        assert_eq!(libimplant_path("arm64-v8a"), IMPLANT_PATH_ARM64);
+        assert_eq!(libimplant_path("armeabi-v7a"), IMPLANT_PATH_ARM32);
+    }
+
+    #[test]
+    fn app_staging_path_is_exact() {
+        assert_eq!(app_staging_dir(), "/data/user/0/ru.voboost");
+    }
+
+    #[test]
+    fn update_transactions_stay_inside_the_root_zone() {
+        assert_eq!(install_transactions_dir(), "/data/voboost/install");
+        assert_eq!(recovery_transactions_dir(), "/data/voboost/recovery");
+    }
+
+    #[test]
+    fn state_files_use_root_state_dir() {
+        assert_eq!(
+            state_file("ivi-soc-modeset"),
+            format!("{STATE_DIR}/ivi-soc-modeset.json")
+        );
+    }
+}

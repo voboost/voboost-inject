@@ -1,0 +1,1751 @@
+#
+# voboost.te — SELinux policy for the voboost daemon domain.
+#
+# Defines the dedicated `voboost` domain entered from init via
+# init_daemon_domain. The load-bearing rules are:
+#
+#   allow voboost system_app:process ptrace;
+#   allow voboost system_app:lnk_file { read open getattr };
+#
+# The ptrace allow is required for PTRACE_ATTACH (denied on Enforcing without
+# it). The lnk_file allow is required to duplicate the target-created agent
+# log-pipe read-end through /proc/<pid>/fd/<n> (a procfs magic link labeled
+# with the target's own context) after injection. On an Enforcing device both
+# are denied from an ordinary domain, so without these allows the daemon can
+# neither inject nor establish the agent log-pipe. Development acceptance
+# runs with Enforcing retained; target-specific runtime and physical-device
+# acceptance must still be demonstrated separately.
+#
+# This file is compiled with the Android SELinux policy build (sepolicy).
+# It is loaded as a vendor or system policy fragment depending on the device.
+#
+
+# ---- Type declarations ----
+
+# The daemon process domain.
+type voboost;
+typeattribute voboost domain;
+# The daemon traverses one categorized app-data parent but receives no generic
+# write permission there. TE rules below still constrain its file access.
+typeattribute voboost mlstrustedsubject;
+
+# The abstract OTA listener has its own object type. The daemon retains its
+# init-bounded process domain and authenticates each peer after accept.
+type voboost_ota_socket;
+typeattribute voboost_ota_socket mlstrustedsubject;
+allow voboost self:process setsockcreate;
+allow voboost voboost_ota_socket:unix_stream_socket {
+    create bind listen accept read write getattr getopt setopt shutdown
+};
+allow { untrusted_app untrusted_app_25 untrusted_app_27 untrusted_app_29 system_app }
+    voboost_ota_socket:unix_stream_socket connectto;
+
+# The exec type labeled on the daemon binary (via file_contexts).
+# init_daemon_domain transitions into voboost when executing this.
+type voboost_exec;
+typeattribute voboost_exec exec_type;
+typeattribute voboost_exec file_type;
+
+type voboost_install;
+typeattribute voboost_install domain;
+typeattribute voboost_install mlstrustedsubject;
+type voboost_install_exec;
+typeattribute voboost_install_exec exec_type;
+typeattribute voboost_install_exec file_type;
+
+# Restore keeps the stock system_file inode label for OEM bootstrap, but every
+# init-owned continuation enters this dedicated domain through the fixed rc
+# service seclabel.
+type voboost_restore;
+typeattribute voboost_restore domain;
+typeattribute voboost_restore mlstrustedsubject;
+
+# Init-owned one-shot used only for a correlated update reboot.
+type voboost_reboot;
+typeattribute voboost_reboot domain;
+
+# The post-fs-data relabel endpoint is a fixed signed argv and does not run
+# with init's ambient authority.
+type voboost_relabel;
+typeattribute voboost_relabel domain;
+typeattribute voboost_relabel mlstrustedsubject;
+
+# The voboost-uninstall component is intentionally isolated from the resident
+# injector. Only this teardown domain receives remount, package, policy-window,
+# init-service control and reboot rights.
+type voboost_uninstall;
+typeattribute voboost_uninstall domain;
+typeattribute voboost_uninstall mlstrustedsubject;
+
+type voboost_uninstall_exec;
+typeattribute voboost_uninstall_exec exec_type;
+typeattribute voboost_uninstall_exec file_type;
+
+# The fixed-purpose SELinux program has a distinct executable type but no
+# process domain. Only the constrained signed uninstaller executes it.
+type voboost_selinux_exec;
+typeattribute voboost_selinux_exec exec_type;
+typeattribute voboost_selinux_exec file_type;
+
+# The root-zone data type (/data/voboost tree, via file_contexts).
+type voboost_data_file;
+typeattribute voboost_data_file file_type;
+typeattribute voboost_data_file data_file_type;
+
+type voboost_operation_file;
+typeattribute voboost_operation_file file_type;
+typeattribute voboost_operation_file data_file_type;
+type voboost_install_root_dir;
+typeattribute voboost_install_root_dir file_type;
+typeattribute voboost_install_root_dir data_file_type;
+type voboost_installed_state_file;
+typeattribute voboost_installed_state_file file_type;
+typeattribute voboost_installed_state_file data_file_type;
+
+type voboost_install_staging_file;
+typeattribute voboost_install_staging_file file_type;
+typeattribute voboost_install_staging_file data_file_type;
+type voboost_update_staging_file;
+typeattribute voboost_update_staging_file file_type;
+typeattribute voboost_update_staging_file data_file_type;
+type voboost_recovery_file;
+typeattribute voboost_recovery_file file_type;
+typeattribute voboost_recovery_file data_file_type;
+type voboost_agent_state_file;
+typeattribute voboost_agent_state_file file_type;
+typeattribute voboost_agent_state_file data_file_type;
+
+# Integrity authority for digest-addressed pristine policy baselines, their
+# canonical metadata, the closed committed inventory and archived init bytes.
+# The resident daemon may read this reverse authority while preparing
+# uninstall, but cannot modify its files or directory names. Only installation
+# the signed teardown domain can write it.
+type voboost_uninstall_result_file;
+typeattribute voboost_uninstall_result_file file_type;
+typeattribute voboost_uninstall_result_file data_file_type;
+
+type voboost_uninstall_data_file;
+typeattribute voboost_uninstall_data_file file_type;
+typeattribute voboost_uninstall_data_file data_file_type;
+
+# Verified generation trees carry the fixed generation type; only the daemon
+# touches them (pipe-only delivery to targets, docs/developer/security).
+#
+# App-owned incoming generation staging. The directory is app uid:gid 0700;
+# the daemon consumes completed immutable transactions from it.
+type voboost_incoming_file;
+typeattribute voboost_incoming_file file_type;
+typeattribute voboost_incoming_file data_file_type;
+# The app (untrusted_app with categories) writes the staged generation into
+# an s0 (no-categories) directory — an MLS "write down" that constraints
+# deny even with TE allows (observed: "avc: denied { write } ...
+# untrusted_app:s0:c55,... -> voboost_incoming_file:s0 tclass=dir").
+# DAC (app uid 0700) still keeps every other domain out.
+typeattribute voboost_incoming_file mlstrustedobject;
+
+# Authenticated courier leases carry unlinked read-only copies, never source files.
+type voboost_cluster_lease_file;
+typeattribute voboost_cluster_lease_file file_type;
+typeattribute voboost_cluster_lease_file data_file_type;
+typeattribute voboost_cluster_lease_file mlstrustedobject;
+type_transition voboost voboost_data_file:file
+    voboost_cluster_lease_file ".courier-copy.tmp";
+allow voboost voboost_cluster_lease_file:file {
+    create read write open getattr setattr unlink rename
+};
+allow untrusted_app voboost:fd use;
+# Signed courier receipts return through the authenticated app socket.
+allow voboost untrusted_app:fd use;
+allow untrusted_app voboost_cluster_lease_file:file { read getattr };
+allow voboost_uninstall voboost_cluster_lease_file:file { read open getattr unlink };
+
+type voboost_generation_file;
+typeattribute voboost_generation_file file_type;
+typeattribute voboost_generation_file data_file_type;
+typeattribute voboost_generation_file mlstrustedobject;
+
+type_transition voboost voboost_data_file:file
+    voboost_uninstall_result_file ".desktop-uninstall-result.json.tmp";
+type_transition voboost voboost_data_file:dir
+    voboost_generation_file "generations";
+type_transition voboost voboost_generation_file:dir
+    voboost_incoming_file "next";
+type_transition voboost voboost_data_file:file
+    voboost_operation_file "operation.lock";
+type_transition voboost voboost_data_file:file
+    voboost_operation_file "operation.json";
+type_transition voboost voboost_data_file:file
+    voboost_operation_file ".operation.json.tmp";
+type_transition voboost_install voboost_data_file:file
+    voboost_operation_file "operation.lock";
+type_transition voboost_install voboost_data_file:file
+    voboost_operation_file "operation.json";
+type_transition voboost_install voboost_data_file:file
+    voboost_operation_file ".operation.json.tmp";
+# Only the named diagnostic history uses the existing operation-file rights.
+type_transition voboost_install voboost_data_file:file
+    voboost_operation_file "install-progress.jsonl";
+type_transition voboost voboost_data_file:file
+    voboost_operation_file "install-progress.jsonl";
+type_transition voboost voboost_data_file:dir
+    voboost_install_root_dir "install";
+type_transition voboost_install voboost_data_file:dir
+    voboost_install_root_dir "install";
+# Transaction children retain the staging type. The restore domain may
+# rename the verified installed-state member only into the install parent.
+type_transition voboost voboost_install_root_dir:dir voboost_install_staging_file;
+type_transition voboost_install voboost_install_root_dir:dir voboost_install_staging_file;
+# Desktop preparation creates only root-owned private transaction members.
+type_transition su voboost_install_root_dir:dir voboost_install_staging_file;
+type_transition su voboost_install_root_dir:file voboost_install_staging_file;
+type_transition voboost voboost_install_root_dir:file
+    voboost_installed_state_file ".state.json.tmp";
+type_transition voboost_install voboost_install_root_dir:file
+    voboost_installed_state_file ".state.json.tmp";
+
+allow voboost voboost_install_root_dir:dir { create read write open add_name remove_name search getattr setattr rmdir };
+allow voboost_install voboost_install_root_dir:dir { read write open add_name remove_name search getattr rmdir };
+allow voboost_uninstall voboost_install_root_dir:dir { search read open getattr write add_name remove_name rename setattr rmdir };
+allow voboost_restore voboost_install_root_dir:dir { read open search getattr write add_name remove_name };
+allow voboost_relabel voboost_install_root_dir:dir { search read open getattr relabelfrom relabelto };
+# Repair previously inherited directory labels only after the fixed root walk
+# verifies ownership, DAC mode, exclusive inode and named descriptor identity.
+allow voboost_relabel voboost_install_root_dir:file { read open getattr relabelfrom };
+allow voboost_reboot voboost_install_root_dir:dir { search read open getattr };
+allow su voboost_install_root_dir:dir { search getattr open read };
+allow su voboost_installed_state_file:file { getattr open read };
+# The fixed desktop observer reads scalar agent state; it cannot change it.
+allow su voboost_agent_state_file:dir { search getattr open read };
+allow su voboost_agent_state_file:file { getattr open read };
+
+allow voboost voboost_installed_state_file:file { create read write open getattr setattr unlink rename };
+allow voboost_install voboost_installed_state_file:file { create read write open getattr setattr unlink rename };
+allow voboost_restore voboost_installed_state_file:file { read open getattr rename unlink relabelto };
+allow voboost_uninstall voboost_installed_state_file:file { read open getattr unlink };
+allow voboost_relabel voboost_installed_state_file:file { read open getattr relabelfrom relabelto };
+
+type_transition voboost voboost_data_file:dir
+    voboost_recovery_file "recovery";
+type_transition voboost_install voboost_data_file:dir
+    voboost_recovery_file "recovery";
+# Protect Restore pre-admission staging before its atomic publication.
+type_transition voboost_restore voboost_data_file:dir
+    voboost_recovery_file "restore-prepare";
+type_transition voboost voboost_install_staging_file:dir
+    voboost_update_staging_file "candidate";
+type_transition voboost voboost_install_staging_file:file
+    voboost_update_staging_file "update-journal.json";
+type_transition voboost voboost_install_staging_file:file
+    voboost_update_staging_file ".update-journal.json.tmp";
+
+# ---- Domain entry from init ----
+# When init executes voboost_exec, transition into the voboost domain.
+# The macro's expansions are spelled out explicitly as well: the runtime
+# SELinux program works on a binary (already expanded) policy where macro
+# expansion of the firmware base cannot be relied upon.
+init_daemon_domain(voboost)
+init_daemon_domain(voboost_install)
+init_daemon_domain(voboost_uninstall)
+allow init voboost_exec:file { execute read open getattr map entrypoint };
+# The daemon re-execs itself as the signed internal inject helper
+# (--internal-inject-helper); same-domain execve needs execute_no_trans on
+# top of entrypoint ("inject helper failed pid=...: spawn signed inject
+# helper: Permission denied (os error 13)" with no AVC — the kernel fails
+# the execve at the no-trans check, free-09-chinese 6.0.3 emulator).
+allow voboost voboost_exec:file { entrypoint read execute execute_no_trans open getattr map };
+# Product reapply verifies and backs up labeled root-flat helpers under Enforcing.
+# Reading them does not authorize the runtime to execute management helpers.
+allow voboost voboost_install_exec:file { read open getattr };
+allow voboost voboost_uninstall_exec:file { read open getattr };
+allow voboost voboost_selinux_exec:file { read open getattr };
+# Read back the protected policy during product activation; firmware labels vary.
+# Policy publication remains owned by the init-launched restore helper.
+allow voboost vendor_configs_file:dir { search read open getattr };
+allow voboost vendor_configs_file:file { read open getattr };
+allow voboost vendor_file:file { read open getattr };
+allow voboost sepolicy_file:file { read open getattr };
+allow init voboost:process { transition noatsecure siginh rlimitinh };
+allow init voboost_install_exec:file { execute read open getattr map entrypoint };
+allow voboost_install voboost_install_exec:file { entrypoint read execute open getattr map };
+allow init voboost_install:process { transition noatsecure siginh rlimitinh };
+allow init voboost_uninstall_exec:file { execute read open getattr map entrypoint };
+allow voboost_uninstall voboost_uninstall_exec:file { entrypoint read execute open getattr map };
+allow init voboost_uninstall:process { transition noatsecure siginh rlimitinh };
+allow init voboost_restore:process { transition noatsecure siginh rlimitinh };
+allow init voboost_relabel:process { transition noatsecure siginh rlimitinh };
+# All voboost executables live under /data, which Android mounts nosuid.
+# Without the explicit process2 nosuid_transition grant the kernel keeps the
+# init domain on every service exec under Enforcing (denied:
+# "avc: denied { nosuid_transition } ... scontext=init
+# tcontext=u:r:voboost_relabel:s0 tclass=process2").
+allow init voboost_relabel:process2 nosuid_transition;
+allow init voboost:process2 nosuid_transition;
+allow init voboost_install:process2 nosuid_transition;
+allow init voboost_restore:process2 nosuid_transition;
+allow init voboost_uninstall:process2 nosuid_transition;
+allow init voboost_reboot:process2 nosuid_transition;
+allow init voboost_reboot:process { transition noatsecure siginh rlimitinh };
+allow voboost_restore system_file:file { entrypoint read open getattr execute execute_no_trans map };
+allow voboost_restore voboost_selinux_exec:file { create read write open getattr setattr unlink rename execute execute_no_trans map relabelfrom relabelto };
+allow voboost_restore voboost:dir { search read open getattr };
+allow voboost_restore voboost:file { read open getattr };
+# v38 diag: restore-runtime-apply probes the enforcing state before
+# committing ("read SELinux enforcing: Permission denied") — the identical
+# rail install already has; plus the app-data handoff probe symmetric with
+# the install continuation set.
+allow voboost_restore selinuxfs:file { read open getattr };
+# The signed product helper verifies the active policy after the reboot.
+allow voboost_restore kernel:security read_policy;
+allow voboost_restore default_prop:file { read open getattr map };
+allow voboost_restore app_data_file:dir search;
+# Machine-profile runtime preconditions read the enforcing state
+# (/sys/fs/selinux/enforce) before committing to the install continuation;
+# without the read the driver aborts on boot-1 with
+# "read SELinux enforcing: Permission denied".
+allow voboost_install selinuxfs:filesystem getattr;
+allow voboost_install selinuxfs:file { read open getattr };
+allow voboost selinuxfs:filesystem getattr;
+allow voboost selinuxfs:file { read open getattr };
+allow voboost_restore security_file:dir { search read open getattr };
+allow voboost_restore security_file:file { read open getattr };
+# Fixed platform/system_ext/product CIL digests are sepolicy_file on Android.
+# Restore reads their identity before publishing precompiled policy; never mutates them.
+allow voboost_restore sepolicy_file:file { read open getattr };
+allow voboost_relabel voboost_selinux_exec:file { entrypoint read open getattr execute map };
+# voboost-restore's contract label is system_file (file_contexts); the fresh
+# boot-1 walk relabels it from system_data_root_file.
+allow voboost_relabel system_file:file { read open getattr relabelfrom relabelto };
+# Boot-1 chicken-and-egg on the emulator: the relabeler binary itself is still
+# labeled system_data_root_file until the relabel walk runs, and init execs it
+# under seclabel u:r:voboost_relabel:s0. The setexeccon transition requires
+# entrypoint on the *actual* file type, and init needs execute on it too —
+# the OEM base labels /data/voboost/* via file_contexts so neither grant exists
+# there ("avc: denied { execute } ... scontext=init
+# tcontext=u:object_r:system_data_root_file:s0 tclass=file" on the first
+# Enforcing boot after install).
+allow init system_data_root_file:file { execute read open getattr map };
+allow voboost_relabel system_data_root_file:file { entrypoint read execute open getattr map relabelfrom };
+# The same boot-1 bootstrap for firmwares whose /data default label is
+# system_data_file (observed on the free-09-chinese 6.0.3 emulator: the OEM
+# policy has no system_data_root_file type at all, so the rules above are
+# skipped as missing-target and init cannot exec the relabeler:
+# "avc: denied { execute } ... scontext=init
+# tcontext=u:object_r:system_data_file:s0 tclass=file").
+allow init system_data_file:file { execute read open getattr map };
+allow voboost_relabel system_data_file:file { entrypoint read execute open getattr map relabelfrom };
+# The restartable terminal successor is another exact argv of the same signed
+# uninstaller. Its explicit seclabel enters the constrained teardown domain
+# through voboost_uninstall_exec; no stock shell is a terminal entry point.
+allow init self:process setexec;
+# Every voboost domain is bounded by init, and the kernel's type_bounds_av
+# intersects (init, voboost_X, process) with (init, init, process): without
+# the transition set on init-self the exec transition is silently masked out
+# ("avc: denied { transition } scontext=init tcontext=voboost_relabel
+# tclass=process" on the free-09-chinese 6.0.3 emulator with all the direct
+# allow rules present in the loaded policy).
+allow init self:process { transition noatsecure siginh rlimitinh };
+# init must traverse /data/voboost to reach and exec the daemon binary;
+# without dir search the service start dies with "Cannot find ... Permission
+# denied" (observed on f0506h 4.14 firmware).
+allow init voboost_data_file:dir { search getattr };
+
+# ---- Binary labeling (chcon to voboost_exec) ----
+# The daemon binary at /data/voboost/voboost-daemon is created by the installer
+# via adb push and inherits the /data default label system_data_file. For
+# init_daemon_domain to transition into the voboost domain, the binary MUST
+# carry the voboost_exec label (the allow rule above gives init execute only
+# on voboost_exec, not on system_data_file). On the f0506h firmware our
+# file_contexts are NOT loaded into the kernel file_contexts database
+# (load_policy is unavailable), so restorecon cannot assign voboost_exec.
+#
+# The init hook (voboost.rc) runs `chcon u:object_r:voboost_exec:s0` on the
+# binary from the init domain (u:r:init:s0) BEFORE starting the daemon, so the
+# relabel happens on every boot after the patched policy is loaded — the
+# voboost_exec type only exists in the kernel policy after the first
+# post-patch reboot, so the chcon cannot run pre-reboot. init needs
+# relabelfrom on the current label (system_data_file on first boot,
+# voboost_data_file if already relabeled by a prior boot's chcon gone wrong)
+# plus relabelto on voboost_exec. Observed denial on f0506h:
+# "avc: denied { relabelfrom } for comm="chcon" scontext=u:r:su:s0
+# tcontext=u:object_r:system_data_file:s0" — the same gap applies to init.
+# Without these rules the binary keeps system_data_file, init cannot exec it,
+# and the service crash-loops with "cannot execve ... Permission denied".
+allow init system_data_file:file relabelfrom;
+allow init voboost_data_file:file relabelfrom;
+allow init voboost_data_file:dir relabelfrom;
+allow init voboost_exec:file { relabelto getattr };
+allow init voboost_install_exec:file { relabelto getattr };
+allow init voboost_uninstall_exec:file { relabelto getattr };
+allow init voboost_uninstall_data_file:dir { relabelto getattr search };
+# The adb-shell su domain also chcons during initial installation (before
+# the first reboot) so the installer can pre-label if the policy is already
+# loaded; harmless if the type is absent at that point (chcon just fails and
+# the init hook retries on boot).
+# su is a firmware domain (not declared here); declaring it lets the SELinux program
+# attach attributes to the existing type. mlstrustedsubject lets the fixed
+# native label endpoint apply the app UID categories to generations/next;
+# ordinary app-data mutation remains outside installer authority.
+type su;
+typeattribute su mlstrustedsubject;
+allow su system_data_file:file relabelfrom;
+allow su system_data_file:dir relabelfrom;
+allow su voboost_data_file:file relabelfrom;
+# --relabel changes the fixed root-zone tree from system_data_file ->
+# voboost_data_file (Android 9 restorecon skips non-standard /data paths).
+allow su voboost_data_file:dir { relabelto getattr search };
+# Uninstall and reinstall run against the ALREADY-LABELED root zone under the
+# patched policy: su needs the full management set (rm -rf, backup read-back,
+# --relabel revisits it). Fresh installs never reach these rules because
+# the tree is still system_data_file (stock rights) until --relabel.
+allow su voboost_data_file:dir { write add_name remove_name create open read setattr rmdir lock };
+allow su voboost_data_file:file { create write open setattr unlink rename append read getattr };
+# Uninstall removes generations/next (app categories on the label are fine:
+# su is in the firmware's native mlstrustedsubject constraint lists) and the
+# wait-generation-staged probe reads the staged files.
+allow su voboost_incoming_file:dir { search open read write remove_name rmdir };
+allow su voboost_incoming_file:file { getattr open read unlink };
+# Target-process dlopen of the payload .so: attested system_app targets
+# and the exact signed launcher/system_server target receive read/execute
+# authority. Other domains receive no payload traversal/execution grant.
+allow system_app voboost_data_file:dir { search getattr };
+allow system_app voboost_data_file:file { read open getattr execute map };
+allow su voboost_data_file:file relabelto;
+allow su voboost_generation_file:dir { relabelto getattr };
+allow su voboost_exec:file { relabelto getattr };
+allow su voboost_install_exec:file { relabelto getattr };
+allow su voboost_uninstall_exec:file { getattr read open execute map };
+allow su voboost_uninstall:process transition;
+# Boot-0 reboot request: on a fresh install the driver runs in the su domain
+# (the product files are not labeled yet — no file_contexts entries on the
+# emulator), and it reboots via set_property("sys.powerctl","reboot"). The
+# voboost_install/restore/reboot/uninstall grants below only fire after boot-1,
+# when the rc services take over. Under Enforcing the boot-0 reboot was denied
+# outright (v8: install stalled at install-reboot-first / reboot-required).
+allow su powerctl_prop:property_service set;
+# The management CLI (adb-root shell in the su domain) raises the stopped
+# daemon init service after a none→interface/hidden startup-mode request
+# (`ctl.start voboost-daemon`). The su domain is permissive on this firmware;
+# the grant keeps the rail correct under a future enforcing su.
+allow su ctl_start_prop:property_service set;
+type_transition su voboost_uninstall_exec:process voboost_uninstall;
+# app-zone labels the app-owned generations/next dir (created by mkdir under
+# system_data_file parents) to voboost_incoming_file: the app must write there
+# under its own uid, and Android 9 restorecon skips non-standard /data paths.
+allow su voboost_incoming_file:dir { relabelto getattr };
+# --relabel revisits the staged next/ tree (incoming -> data_file ->
+# incoming-with-app-categories), so relabelfrom is needed in both directions.
+allow su voboost_incoming_file:dir relabelfrom;
+allow su voboost_incoming_file:file { relabelto relabelfrom getattr };
+# verify-daemon (su) reads generations/current + the active generation's
+# catalog/dex; uninstall removes the generations tree.
+allow su voboost_generation_file:dir { search open read write remove_name rmdir };
+allow su voboost_generation_file:file { getattr open read unlink };
+# verify-daemon resolves the daemon process: pidof + readlink /proc/<pid>/exe
+# + cat /proc/<pid>/attr/current. /proc/<pid> entries carry the domain type.
+allow su voboost:dir { search read open getattr };
+allow su voboost:file { read open getattr };
+allow su voboost:lnk_file { read getattr };
+# The peer domain is bounded by init; readlink must survive target bounds.
+allow su init:lnk_file read;
+# The installer's wait-generation-staged probe (sh in the su domain) checks
+# the staged files inside generations/next.
+allow su voboost_incoming_file:dir { search open read };
+allow su voboost_incoming_file:file { getattr open read };
+# ---- Exact target-process authority ----
+# THE LOAD-BEARING RULE. On Enforcing, PTRACE_ATTACH is denied without this.
+# The catalog may select any of its exact process names dynamically, but the
+# daemon and stopped-process verifier bind the signed target identity;
+# launcher/system_server additionally requires UID 1000 in the implant.
+# The captured f0506h free-09 Chinese 6.0.3 policy uses system_app for the
+# application targets. Keep every target-labeled permission aligned
+# with this runtime fence; listing /proc does not authorize another domain.
+allow voboost system_app:process { ptrace sigstop getattr sigchld signull };
+
+# ---- /proc/<pid> access for the exact target domain ----
+# The injector and daemon read /proc/<pid>/maps (bitness detection +
+# reconcile marker), cmdline/stat/status/attr/current (discovery and repeated
+# identity attestation), task (thread-group stabilization), exe (ABI evidence)
+# and fd (pipe adoption). Numeric PID entries remain dynamically discovered;
+# unreadable entries from any other domain are skipped as non-candidates.
+allow voboost system_app:file { read open getattr };
+allow voboost system_app:dir { search read open getattr };
+
+# ---- /proc enumeration across the whole process table ----
+# NOTE: the full-table /proc sweep by the resident daemon needs no further
+# grants. Unrelated-domain entries return EACCES under Enforcing and the
+# watcher skips them as non-candidates BY DESIGN (daemon/src/process_watcher.
+# rs: unreadable entries are skipped). The three explicit target domains
+# remain the exact fence. Permissive sweeps log these skips as denials, but granting
+# read on other domains is caught by the roundtrip test as a target-surface
+# leak and breaks the authority contract.
+
+# ---- /proc/<pid>/fd magic-link access for the agent log-pipe handoff ----
+# After implant_init creates the log pipe inside the target, the root injector
+# duplicates the target's read-end via open("/proc/<pid>/fd/<n>"). That entry
+# is a procfs magic link (class lnk_file), labeled with the target's own
+# SELinux context (e.g. u:object_r:untrusted_app:s0). open() on it therefore
+# needs lnk_file { read open getattr } against `system_app` — NOT file, which
+# covers only regular procfs entries. The directory rule above traverses fd.
+# A permissive emulator masks missing permissions; this path remains unverified
+# on Enforcing hardware.
+allow voboost system_app:lnk_file { read open getattr };
+
+# ---- adopted log/state pipe ends inside the target ----
+# After the magic-link open follows to the pipe itself, inode_permission
+# checks the real object class: the agent log/state pipes are anonymous
+# pipefs inodes created by implant_init runs in the target's context, so
+# they carry the target label (u:r:system_app:s0) — NOT voboost_data_file.
+# The injector duplicates the log read-end with O_RDONLY and the state-reply
+# write-end with O_WRONLY through /proc/<pid>/fd/<n>, which resolves to
+# fifo_file { read open } / { write open } against system_app
+# ("record /proc open -> errno=13" / "state_reply /proc open -> errno=13",
+# free-09-chinese 6.0.3 emulator after the v124 bias fix). The self:fifo_file
+# grants cover only daemon-created pipes, not target-created ones.
+allow voboost system_app:fifo_file { read write open getattr };
+
+# The signed launcher target also runs in the platform system_server domain.
+# Rust admission requires exactly launcher/system_server; the implant additionally
+# binds UID 1000 and the existing services.jar loader. These are transport and
+# ptrace-stop rights only: no signal, sigkill, proc write, or domain wildcard.
+allow voboost system_server:process { ptrace sigstop getattr sigchld };
+allow voboost system_server:file { read open getattr };
+allow voboost system_server:dir { search read open getattr };
+allow voboost system_server:lnk_file { read open getattr };
+allow voboost system_server:fifo_file { read write open getattr };
+allow system_server voboost_data_file:dir { search getattr };
+allow system_server voboost_data_file:file { read open getattr execute map };
+allow system_server voboost_data_file:sock_file { write open getattr };
+allow system_server voboost:unix_stream_socket connectto;
+allow system_server voboost:process sigchld;
+allow system_server init:process sigchld;
+# Explicitly approved for the LSPlant/Dobby anonymous executable trampoline.
+allow system_server self:process execmem;
+
+# The signed phone agent also targets com.android.bluetooth, whose retained
+# Free A9 seapp mapping selects bluetooth. Stock appdomain already supplies
+# execmem; stock bluetooth-to-init socket/sigchld rights satisfy target bounds.
+allow voboost bluetooth:process { ptrace sigstop getattr sigchld };
+allow voboost bluetooth:file { read open getattr };
+allow voboost bluetooth:dir { search read open getattr };
+allow voboost bluetooth:lnk_file { read open getattr };
+allow voboost bluetooth:fifo_file { read write open getattr };
+allow bluetooth voboost_data_file:dir { search getattr };
+allow bluetooth voboost_data_file:file { read open getattr execute map };
+allow bluetooth voboost_data_file:sock_file { write open getattr };
+allow bluetooth voboost:unix_stream_socket connectto;
+allow bluetooth voboost:process sigchld;
+
+# ---- Root-zone access (/data/voboost) ----
+# The resident daemon reads/writes ordinary manifests, logs, run state, and
+# payload files.  Installation and the terminal voboost-uninstall component retain their
+# separately scoped management rights.
+allow voboost voboost_data_file:dir {
+    create read write open add_name remove_name search getattr setattr lock
+};
+allow voboost voboost_data_file:file {
+    create read write open getattr setattr unlink rename append lock ioctl
+};
+# Canonical-log rotation publishes the full completed segment through a
+# no-replace hard link (segment-active.jsonl -> segment-<stamp>-<seq>.jsonl).
+allow voboost voboost_data_file:file link;
+allow voboost voboost_data_file:sock_file {
+    create read write open getattr setattr unlink
+};
+
+# The app may connect to the daemon-owned fixed log-ingress filesystem socket
+# and the fixed abstract OTA socket. DAC protects the filesystem socket;
+# SO_PEERCRED, packages.list, process identity, and the committed installed APK
+# identity authenticate every accepted stream inside the daemon. The abstract
+# OTA endpoint deliberately creates no app-writable sock_file authority.
+allow untrusted_app voboost_data_file:sock_file { write open getattr };
+allow untrusted_app_25 voboost_data_file:sock_file { write open getattr };
+allow untrusted_app_27 voboost_data_file:sock_file { write open getattr };
+allow untrusted_app_29 voboost_data_file:sock_file { write open getattr };
+allow system_app voboost_data_file:sock_file { write open getattr };
+allow untrusted_app voboost:unix_stream_socket connectto;
+allow untrusted_app_25 voboost:unix_stream_socket connectto;
+allow untrusted_app_27 voboost:unix_stream_socket connectto;
+allow untrusted_app_29 voboost:unix_stream_socket connectto;
+allow system_app voboost:unix_stream_socket connectto;
+# Kernel 4.4 selinux_task_wait checks the REVERSED pair — task_has_perm(p
+# /* tracee */, current /* tracer */, PROCESS__SIGCHLD,
+# security/selinux/hooks.c:3744 in v4.4.302) — so the ptrace tracer can only
+# waitpid a tracee when the TRACEE holds sigchld against the TRACER domain.
+# Without this grant the daemon's inject helper dies on the first
+# waitpid(tid) after a successful PTRACE_ATTACH with errno 13
+# ("wait tid=... errno=13 (Permission denied)" in threadgroup-dbg.log), and
+# every injection returns unsafe-cleanup. The su probe succeeds because the
+# stock policy grants (system_app -> su): the pair orientation, not the
+# kernel, was the differentiator. The init mirror feeds the kernel bounds
+# intersection (voboost is bounded by init).
+allow system_app voboost:process sigchld;
+allow system_app init:process sigchld;
+
+# The resident daemon reads immutable committed authority while preparing an
+# uninstall request. Operation marker and status files live in the ordinary
+# transaction-correlated recovery tree, never in this protected directory.
+allow voboost voboost_uninstall_result_file:file { create read write open getattr setattr unlink rename };
+allow voboost_relabel voboost_uninstall_result_file:file { read open getattr relabelfrom relabelto };
+# The fixed signed management endpoint retains the adb-root su domain. It
+# observes the resident's reply without gaining publication or relabel rights.
+allow su voboost_uninstall_result_file:file { read open getattr };
+allow voboost voboost_uninstall_data_file:file { read open getattr };
+allow voboost voboost_uninstall_data_file:dir {
+    read open search getattr
+};
+
+# Terminal cleanup can stat and remove the daemon's desktop admission reply.
+allow voboost_uninstall voboost_uninstall_result_file:file { getattr unlink };
+
+# The signed one-shot tears down the ordinary root zone and exclusively owns
+# the protected backup/inventory/state files.
+allow voboost_uninstall voboost_data_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost_uninstall voboost_data_file:file {
+    create read write open getattr setattr unlink rename append lock ioctl
+};
+# Sector-4 log sweep hardlinks rotated segments out of logs/.
+allow voboost_uninstall voboost_data_file:file link;
+allow voboost_uninstall voboost_uninstall_data_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost_uninstall voboost_uninstall_data_file:file {
+    create read write open getattr setattr unlink rename append lock ioctl
+};
+allow voboost_uninstall system_data_file:dir relabelfrom;
+allow voboost_uninstall system_data_file:file relabelfrom;
+allow voboost_uninstall voboost_data_file:dir { relabelfrom relabelto };
+allow voboost_uninstall voboost_data_file:file { relabelfrom relabelto };
+# The run tree keeps its socket inode on the root-zone label; terminal
+# cleanup stats it before sweeping the zone.
+allow voboost_uninstall voboost_data_file:sock_file {
+    create read write open getattr setattr unlink
+};
+# Recovery actions can be logged through the app-log socket path; the unix
+# stream socket itself is used to signal the watchdog and successor.
+allow voboost_uninstall voboost_data_file:unix_stream_socket {
+    create bind listen accept read write getattr setattr connect
+};
+allow voboost_uninstall voboost_uninstall_data_file:dir { relabelfrom relabelto };
+allow voboost_uninstall voboost_uninstall_data_file:file { relabelfrom relabelto };
+# Terminal cleanup stats every member of the product root zone before
+# sweeping it: the transaction trees below /data/voboost therefore need the
+# same inspection rails on their own labels.
+allow voboost_uninstall voboost_install_staging_file:dir {
+    search read open getattr write add_name remove_name rename setattr rmdir
+};
+allow voboost_uninstall voboost_install_staging_file:file {
+    read open getattr write create setattr unlink rename lock ioctl
+};
+allow voboost_uninstall voboost_update_staging_file:dir {
+    search read open getattr write add_name remove_name rename setattr rmdir
+};
+allow voboost_uninstall voboost_update_staging_file:file {
+    read open getattr write create setattr unlink rename lock ioctl
+};
+allow voboost_uninstall voboost_agent_state_file:dir {
+    search read open getattr write add_name remove_name rename setattr rmdir
+};
+allow voboost_uninstall voboost_agent_state_file:file {
+    read open getattr write create setattr unlink rename lock ioctl
+};
+# Terminal cleanup stats and sweeps the staged incoming tree (its directories
+# carry app-UID MLS categories; the domain is already mlstrustedsubject).
+allow voboost_uninstall voboost_incoming_file:dir { relabelfrom relabelto };
+allow voboost_uninstall voboost_incoming_file:dir {
+    search read open getattr write add_name remove_name rename setattr rmdir
+};
+allow voboost_uninstall voboost_incoming_file:file {
+    read open getattr write create setattr unlink rename lock ioctl
+};
+allow voboost_uninstall voboost_generation_file:dir { relabelfrom relabelto };
+allow voboost_uninstall voboost_generation_file:file { relabelfrom relabelto };
+# Terminal cleanup stats and sweeps the committed generation tree members.
+allow voboost_uninstall voboost_generation_file:dir {
+    search read open getattr write add_name remove_name rename setattr rmdir
+};
+allow voboost_uninstall voboost_generation_file:file {
+    read open getattr write create setattr unlink rename lock ioctl
+};
+# The uninstall one-shot owns its transaction under recovery/<tx>/: the
+# directory tree keeps the voboost_recovery_file label while the WAL and
+# prepared marker carry voboost_data_file (published by the resident daemon).
+# Journal/marker mutation passes through matching temps before the rename, so
+# the dir needs add_name/remove_name alongside the read rails; terminal
+# cleanup rmdir's the transaction directory itself.
+allow voboost_uninstall voboost_recovery_file:dir {
+    search read open getattr write add_name remove_name rename setattr rmdir
+};
+allow voboost_uninstall voboost_recovery_file:file {
+    read open getattr write append create setattr unlink rename lock ioctl
+};
+# Journal/marker temps are created inside recovery/<tx> (inheriting
+# voboost_recovery_file) and are relabeled to voboost_data_file before the
+# atomically renamed publication.
+allow voboost_uninstall voboost_recovery_file:file relabelfrom;
+# The remount journal inside recovery/<tx> keeps the transaction directory's
+# recovery-tree label; re-publishing it fsetxattr's that same label, which
+# still needs the relabelto permission on the unchanged type.
+allow voboost_uninstall voboost_recovery_file:file relabelto;
+# The terminal watchdog binds a stream socket inside recovery/<tx>/; the
+# socket inode inherits the recovery directory label.
+allow voboost_uninstall voboost_recovery_file:sock_file {
+    create read write open getattr setattr unlink
+};
+# The uninstall one-shot takes the global OperationLease: it flocks
+# operation.lock and publishes its observation projection of operation.json.
+# The terminal phases retain open handles on the parent directories they
+# sweep (/data for the root zone); the AOSP-tree /data directory keeps the
+# system_data_root_file label and needs the same read rails the installer
+# already carries. The terminal exact-zero closes with rmdir("/data/voboost"):
+# VIS rmdir is a write mutation on the parent, so the sweep rails include
+# write/remove_name (observed as the v83 EACCES on the final zone unlink).
+allow voboost_uninstall system_data_root_file:dir {
+    search read open getattr write remove_name
+};
+# The supported data mount can also retain system_data_file on its root.
+# Exact-zero uses the retained, inode-checked /data parent for one fixed rmdir.
+allow voboost_uninstall system_data_file:dir { write remove_name };
+allow voboost_uninstall voboost_operation_file:file {
+    read write open getattr setattr create unlink rename lock
+};
+allow voboost_uninstall system_data_file:dir relabelto;
+allow voboost_uninstall system_data_file:file relabelto;
+allow voboost_uninstall voboost_exec:file relabelto;
+# Terminal cleanup stats the committed runtime executables before unlinking
+# them alongside the swept root zone. The restore executable keeps the stock
+# system_file label (bootstrap program), so its stat rail rides the firmware
+# type.
+allow voboost_uninstall voboost_exec:file { getattr read open unlink };
+allow voboost_uninstall voboost_install_exec:file { getattr read open unlink };
+allow voboost_uninstall voboost_uninstall_exec:file { getattr read open unlink };
+allow voboost_uninstall system_file:file { getattr read open unlink };
+allow voboost_uninstall voboost_uninstall_exec:file relabelto;
+allow voboost_uninstall voboost_selinux_exec:file relabelto;
+# The uninstall one-shot inspects the committed voboost-selinux binary before
+# removing it, then unlinks it as a system artifact (observed denial:
+# "{ unlink } ... tcontext=voboost_selinux_exec").
+allow voboost_uninstall voboost_selinux_exec:file { getattr read open unlink };
+
+allow voboost voboost_incoming_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost voboost_incoming_file:file {
+    create read write open getattr setattr unlink rename append lock ioctl
+};
+
+# Android 9 OEM builds may place ru.voboost in any of these target-SDK app
+# domains. DAC ownership keeps other apps out even though they share a domain.
+allow untrusted_app voboost_incoming_file:dir {
+    read write open add_name remove_name search getattr setattr
+};
+allow untrusted_app voboost_incoming_file:file {
+    create read write open getattr setattr unlink rename
+};
+allow untrusted_app_25 voboost_incoming_file:dir {
+    read write open add_name remove_name search getattr setattr
+};
+allow untrusted_app_25 voboost_incoming_file:file {
+    create read write open getattr setattr unlink rename
+};
+allow untrusted_app_27 voboost_incoming_file:dir {
+    read write open add_name remove_name search getattr setattr
+};
+allow untrusted_app_27 voboost_incoming_file:file {
+    create read write open getattr setattr unlink rename
+};
+allow untrusted_app_29 voboost_incoming_file:dir {
+    read write open add_name remove_name search getattr setattr
+};
+allow untrusted_app_29 voboost_incoming_file:file {
+    create read write open getattr setattr unlink rename
+};
+
+allow voboost voboost_generation_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost voboost_generation_file:file {
+    create read write open getattr setattr unlink rename append lock ioctl
+};
+
+# Global operation authority is separated from ordinary runtime data. Runtime
+# owns only update WALs; install owns only install staging and recovery.
+allow voboost voboost_operation_file:file {
+    create read write open getattr setattr unlink rename lock ioctl
+};
+allow voboost voboost_install_staging_file:dir {
+    create read write open add_name remove_name search getattr setattr rmdir
+};
+allow voboost voboost_install_staging_file:file {
+    create read write open getattr setattr unlink rename lock ioctl
+};
+allow voboost voboost_update_staging_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost voboost_update_staging_file:file {
+    create read write open getattr setattr unlink rename lock ioctl
+};
+allow voboost voboost_recovery_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost voboost_recovery_file:file {
+    create read write open getattr setattr unlink rename lock ioctl
+};
+# Uninstall admission inside the resident daemon publishes the corruption-free
+# WAL and prepared marker into recovery/<tx>/ with the fixed root-zone label
+# (write_fixed_labeled -> prepare_trusted_labeled -> fsetxattr). The temp file
+# inherits voboost_recovery_file from the transaction directory, so relabeling
+# it to voboost_data_file requires relabelfrom on the source type and
+# relabelto on the target type.
+allow voboost voboost_recovery_file:file relabelfrom;
+allow voboost voboost_data_file:file relabelto;
+
+# runtime also publishes its own desktop-request/handoff temp files under
+# /data/voboost/run via write_atomic; the relabel pair is only granted for the
+# uninstall WAL path above, everything else stays on the inherited label.
+
+allow voboost voboost_agent_state_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir
+};
+allow voboost voboost_agent_state_file:file {
+    create read write open getattr setattr unlink rename lock ioctl
+};
+
+allow voboost_install voboost_data_file:dir { search read open getattr };
+# Boot-1 continuation under Enforcing: the install
+# rc service publishes operation.json/.tmp and the lease lock in the root
+# zone (dir write/add_name/remove_name), stats root.json, and its fixed
+# process probes traverse /data and /data/local/tmp.
+allow voboost_install voboost_data_file:dir { write add_name remove_name lock };
+allow voboost_install voboost_data_file:file { read open getattr };
+# Boot-2 finalization: the persisted
+# uninstall mirror directory is created inside the root zone (create+setattr
+# on voboost_data_file:dir), relabeled to its dedicated persistent type
+# (relabelfrom voboost_data_file:dir / relabelto voboost_uninstall_data_file),
+# then populated and rename-flipped (.precompiled_sepolicy.orig.tmp,
+# relabelfrom voboost_uninstall_data_file:file). The app's installed data
+# directory is probed for the ownership handoff (app_data_file:dir search).
+allow voboost_install voboost_data_file:dir { create setattr relabelfrom };
+allow voboost_install voboost_uninstall_data_file:dir { relabelto };
+allow voboost_install voboost_uninstall_data_file:file { relabelfrom };
+allow voboost_install app_data_file:dir { search getattr };
+allow voboost_install shell_data_file:dir { search read open getattr };
+allow voboost_install system_data_root_file:dir { search read open getattr };
+allow voboost_install voboost_operation_file:file {
+    create read write open getattr setattr unlink rename lock ioctl
+};
+allow voboost_install voboost_install_staging_file:dir {
+    read open search getattr remove_name rmdir
+};
+allow voboost_install voboost_install_staging_file:file {
+    read open getattr unlink
+};
+allow voboost_install voboost_recovery_file:dir {
+    create read write open add_name remove_name search getattr setattr rename rmdir relabelfrom
+};
+allow voboost_install voboost_recovery_file:file {
+    create read write open getattr setattr unlink rename lock ioctl relabelfrom
+};
+allow voboost_install voboost_uninstall_data_file:dir {
+    create read write open add_name remove_name search getattr setattr rename
+};
+allow voboost_install voboost_uninstall_data_file:file {
+    create read write open getattr setattr unlink rename lock ioctl relabelto
+};
+# Terminal install cleanup walks the generations tree, takes over the consumed
+# root-owned install-window staging directory and re-owns it (fchown) as the
+# installed application identity, enabling app-authored OTA staging afterward.
+allow voboost_install voboost_generation_file:dir { search read open getattr };
+# verify_generation_acknowledgement reads the generations/current pointer
+# (65 bytes, mode 0444) after the daemon ack; without the file-level read the
+# install-agents phase fails terminally with "open /data/voboost/generations/
+# current: Permission denied" (v29 gate, operation.json error).
+allow voboost_install voboost_generation_file:file { read open getattr };
+# Terminal install-cleanup tail (v30 permissive census, one hit each): the
+# installer re-owns the consumed staging directory root (dir write), chowns
+# it to the installed app identity (self chown), stats the adopted incoming
+# tree (file getattr), and servicemanager hands the resolved service binder
+# object back to the pm/appops client (binder transfer — mirror of the
+# voboost_uninstall servicemanager set).
+allow voboost_install voboost_install_staging_file:dir { write add_name };
+allow voboost_install self:capability chown;
+allow voboost_install voboost_incoming_file:file { getattr read open };
+allow voboost_install voboost_incoming_file:dir { search read open getattr setattr };
+allow voboost_install self:capability { dac_read_search dac_override sys_admin };
+# Same fixed-process/runtime self-probes the relabeler needed: getsched/signal,
+# unix_dgram_socket create, /proc/<own pid> search — the install service
+# exits 127 without them.
+allow voboost_install self:process { getsched signal fork setcap getcap setpgid sigchld sigkill };
+allow voboost_install self:unix_dgram_socket { create read write connect send_msg };
+# Property-service dialogue (sys.powerctl / ctl.* via set_property): the
+# client creates and connects a unix STREAM socket to init. v31 gate stalled
+# at install-reboot-second with "multimedia reboot request failed" and the
+# census line "avc: denied { create } scontext=voboost_install
+# tcontext=voboost_install tclass=unix_stream_socket". The same set_property
+# rail exists in restore/reboot/uninstall — granted to all four at once
+# (voboost already has the full set).
+# The watchdog/successor sockets are bound by the uninstall one-shot itself:
+# SELinux treats the stream socket class as self, so bind/listen/accept ride
+# the domain's own socket (observed denial: "{ bind } ... tcontext=voboost_uninstall
+# tclass=unix_stream_socket"). The commit dialogue also tunes socket
+# timeouts (set_read_timeout/set_write_timeout → setsockopt) and reads
+# SO_PEERCRED for the peer attestation (getsockopt), observed as the v79
+# "bound uninstall watchdog read timeout: Permission denied" pair: both the
+# watchdog (after accept) and the one-shot (after connect) died on the
+# setsockopt before any socket I/O.
+allow voboost_uninstall self:unix_stream_socket {
+    create bind listen accept connect connectto read write getattr setattr
+    setopt getopt
+};
+# Closed opt-in emulator acceptance: installer owns a private boot-bound socket;
+# only the existing resident runtime relays the fixed management request.
+allow voboost_install self:unix_stream_socket { bind listen accept getopt setopt shutdown };
+allow voboost_install voboost_recovery_file:sock_file { create read write open getattr setattr unlink };
+allow voboost voboost_recovery_file:sock_file { write open getattr };
+allow voboost voboost_install:unix_stream_socket connectto;
+allow voboost_install self:unix_stream_socket { create connect read write getattr };
+allow voboost_restore self:unix_stream_socket { create connect read write getattr };
+allow voboost_reboot self:unix_stream_socket { create connect read write getattr };
+allow voboost_install self:unix_stream_socket { create connect read write getattr };
+allow voboost_restore self:unix_stream_socket { create connect read write getattr };
+allow voboost_reboot self:unix_stream_socket { create connect read write getattr };
+allow voboost_uninstall self:unix_stream_socket { create connect read write getattr };
+allow voboost_install self:dir search;
+# Shared self-attestation probes (fixed_process / resident_daemon_status read
+# /proc/self/exe and /proc/self/comm before any phase work; the install rc
+# service exits 1 within milliseconds without them.
+allow voboost_install self:lnk_file read;
+allow voboost_install self:file { read open getattr };
+# The install utility shells out to pm/cmd the same way the resident does
+# (package identity probes and the final APK handoff verification). The
+# child stays in voboost_install and needs the same service-client rails:
+# the /dev/binder device, TCGETS-style ioctl on the inherited stdin/stdout
+# pipes, and the servicemanager/crash_dump helper exec pattern.
+allow voboost_install self:fifo_file { create read write open getattr setattr ioctl };
+allow voboost_restore self:process { getsched signal fork setcap getcap setpgid sigchld sigkill };
+allow voboost_restore self:unix_dgram_socket { create read write connect send_msg };
+allow voboost_restore self:dir search;
+allow voboost_restore self:lnk_file read;
+allow voboost_restore self:file { read open getattr };
+allow voboost_relabel self:process { getsched signal fork setcap getcap };
+allow voboost_relabel self:file { read open getattr };
+allow voboost_uninstall self:process { signal fork getsched setcap getcap setpgid sigchld sigkill };
+allow voboost_uninstall self:unix_dgram_socket { create read write connect send_msg };
+allow voboost_uninstall self:dir search;
+allow voboost_uninstall self:lnk_file read;
+allow voboost_uninstall self:file { read open getattr };
+allow voboost_reboot self:process { getsched signal fork setcap getcap };
+allow voboost_reboot self:unix_dgram_socket { create read write connect send_msg };
+allow voboost_reboot self:dir search;
+allow voboost_reboot self:lnk_file read;
+allow voboost_reboot self:file { read open getattr };
+allow voboost_install labeledfs:filesystem remount;
+allow voboost_install property_socket:sock_file write;
+allow voboost_install init:unix_stream_socket connectto;
+allow voboost_install powerctl_prop:property_service set;
+allow voboost_install toolbox_exec:file { read getattr execute execute_no_trans open map };
+allow voboost_install shell_exec:file { read getattr execute execute_no_trans open map };
+allow voboost_install system_file:file { read open getattr execute execute_no_trans map };
+allow voboost_install system_file:dir { search read open write add_name remove_name getattr };
+# Runtime-verify re-reads the staged daemon binary under its
+# voboost_exec label before handing the zone to the resident;
+# without it the verify step fails with "open voboost-daemon: EACCES".
+# Runtime-verify re-reads every committed native artifact against the
+# manifest under each artifact's own label; without the matching read
+# grant the verify step fails with "open voboost-daemon/-install/
+# -uninstall/-selinux: EACCES".
+allow voboost_install voboost_exec:file { read open getattr };
+allow voboost_install voboost_install_exec:file { read open getattr };
+allow voboost_install voboost_uninstall_exec:file { read open getattr };
+allow voboost_install voboost_selinux_exec:file { read open getattr };
+allow voboost_install vendor_file:file { read write open getattr create unlink rename setattr relabelfrom relabelto };
+allow voboost_install vendor_file:dir { search read open write add_name remove_name getattr };
+# Atomic policy and digest publication preserves the firmware's config label.
+allow voboost_install vendor_configs_file:file { read write open getattr create unlink rename setattr relabelfrom relabelto };
+allow voboost_install vendor_configs_file:dir { search read open write add_name remove_name getattr };
+# Package-manager client chain for the install-agents continuation (the
+# frozen-closure apply runs /system/bin/pm and /system/bin/appops as fixed
+# children in THIS domain, and install-cleanup's observe_installed_apk runs
+# the same pm path probe). Observed on the enforcing emulator at
+# install-cleanup: operation.json error "installed application path query
+# failed: cmd: Can't find service: package" — the same service find / binder
+# dialogue the resident daemon needed, in the install domain's own copy:
+allow voboost_install appops_service:service_manager find;
+allow voboost_install rootfs:dir { read open getattr };
+# ---- Package-manager client chain, the four pm-client domains ----
+# install, restore, runtime and uninstall all fork the fixed /system/bin/pm
+# and /system/bin/appops shell wrappers and speak the identical binder
+# service dialogue (see the per-domain evidence notes below). The rules are
+# one block so a new gate-cycle denial is fixed for every domain at once:
+# the /dev/binder device, the crash_dump64 helper exec pattern, service
+# find, both binder directions, the reply rails back into the pm child
+# (fd use / fifo write), and the descriptor-relative base-APK reads.
+allow { voboost_install voboost_restore voboost voboost_uninstall } binder_device:chr_file { open read write ioctl getattr map };
+# v35/v36 census: the cmd/pm child retunes its own scheduler; runtime has
+# the same right inside its wider self:process set below.
+allow { voboost_install voboost_restore voboost_uninstall } self:process setsched;
+allow { voboost_install voboost_restore voboost voboost_uninstall } crash_dump_exec:file { read getattr open execute execute_no_trans map };
+allow { voboost_install voboost_restore voboost voboost_uninstall } servicemanager:binder call;
+# servicemanager hands the resolved service binder object back to the pm
+# client (the v35 census shape); uninstall already had the wider two-way
+# servicemanager set, which stays below.
+allow servicemanager { voboost_install voboost_restore voboost voboost_uninstall }:binder transfer;
+# servicemanager resolves the caller's SELinux context by walking
+# /proc/<caller pid> on every binder request (getpidcon on the PID the
+# caller shipped). The base policy's attribute-spread
+# `allow servicemanager domain:dir search` family never covers
+# injection-created types, so every pm/appops service lookup from the four
+# pm-client domains fails as `cmd: Can't find service: package` — without a
+# single binder AVC, because the refusal is servicemanager's own /proc walk
+# ("avc: denied { search } for comm=\"servicemanager\" name=\"<pid>\"
+# scontext=u:r:servicemanager:s0 tcontext=u:r:voboost:s0
+# tclass=dir permissive=0", free-09-chinese 6.0.3 emulator; the daemon log
+# then loops on "installed application path query failed").
+allow servicemanager { voboost_install voboost_restore voboost voboost_uninstall }:dir search;
+allow servicemanager { voboost_install voboost_restore voboost voboost_uninstall }:file { open read getattr };
+allow servicemanager { voboost_install voboost_restore voboost voboost_uninstall }:process getattr;
+# Bounds masking target side: voboost domains are bounded by init, so every
+# servicemanager→voboost grant above is intersected with (servicemanager,
+# init) — and the stock AOSP servicemanager survey explicitly excludes init
+# (`allow servicemanager { domain -init }:dir search ...`). Without these
+# init-target mirrors the kernel silently strips the grants and every binder
+# lookup from the daemon still fails with `cmd: Can't find service: package`
+# ("avc: denied { search } ... scontext=u:r:servicemanager:s0
+# tcontext=u:r:voboost:s0 tclass=dir permissive=0" while the loaded
+# avtab already carries the rule, free-09-chinese 6.0.3 emulator).
+allow servicemanager init:dir search;
+allow servicemanager init:file { open read getattr };
+allow servicemanager init:process getattr;
+# Bounds-masked binder transfer mirror: without it servicemanager cannot
+# hand the resolved package service binder back to the uninstall component
+# ("avc: denied { transfer } ... scontext=u:r:servicemanager:s0
+# tcontext=u:r:voboost_uninstall:s0 tclass=binder permissive=0"), so every
+# `pm path` in the uninstall transaction dies as
+# "cmd: Can't find service: package".
+allow servicemanager init:binder transfer;
+allow { voboost_install voboost_restore voboost voboost_uninstall } package_service:service_manager find;
+allow { voboost_install voboost_restore voboost voboost_uninstall } system_server:binder { call transfer };
+allow system_server { voboost_install voboost_restore voboost voboost_uninstall }:binder { call transfer };
+allow system_server { voboost_install voboost_restore voboost voboost_uninstall }:fd use;
+allow system_server { voboost_install voboost_restore voboost voboost_uninstall }:fifo_file write;
+# Bounds-masked system_server mirrors: the same type_attribute_bounds_av cut
+# as the servicemanager set above. Every system_server→voboost grant riding
+# the binder_REPLY rail back into the cmd/pm child must survive intersection
+# with (system_server, init) or the kernel silently strips it — and the
+# package-manager dialogue dies as "cmd: Failure calling service package:
+# Failed transaction (2147483646)" while the loaded avtab carries the direct
+# rule (free-09-chinese 6.0.3 emulator, v143 gate: bounds notice
+# "reason=bounds scontext=system_server tcontext=voboost_uninstall
+# tclass=fifo_file perms=write" beside the matching avc denial for the
+# cmd child's stdout pipe).
+allow system_server init:binder { call transfer };
+allow system_server init:fd use;
+allow system_server init:fifo_file write;
+allow { voboost_install voboost_restore voboost voboost_uninstall } apk_data_file:dir { search read open getattr };
+allow { voboost_install voboost_restore voboost voboost_uninstall } apk_data_file:file { read open getattr };
+
+# Restore exercises the same two-reboot policy/runtime closure as install but
+# has no generation acknowledgement authority. Its executable remains
+# system_file; these are the effective init-continuation rails.
+# The signed system helper serializes access to its owned Cluster state directory.
+allow voboost_restore voboost_data_file:dir { search read open getattr write add_name remove_name lock };
+allow voboost_restore voboost_data_file:file { read open getattr };
+allow voboost_restore shell_data_file:dir { search read open getattr };
+allow voboost_restore voboost_data_file:file { create read write open getattr setattr unlink rename lock ioctl };
+allow voboost_restore voboost_operation_file:file { create read write open getattr setattr unlink rename lock ioctl };
+# Restore inspects install authority and verifies the staged product manifest.
+allow voboost_restore voboost_install_staging_file:dir { read open search getattr };
+allow voboost_restore voboost_install_staging_file:file { read open getattr };
+# Cross-parent atomic publication of the protected restore-prepare directory.
+allow voboost_restore voboost_recovery_file:dir { create read write open add_name remove_name search getattr setattr rename reparent rmdir };
+allow voboost_restore voboost_recovery_file:file { create read write open getattr setattr unlink rename lock ioctl };
+allow voboost_restore voboost_uninstall_data_file:dir { create read write open add_name remove_name search getattr setattr rename };
+allow voboost_restore voboost_uninstall_data_file:file { create read write open getattr setattr unlink rename lock ioctl };
+allow voboost_restore self:capability { dac_read_search dac_override sys_admin };
+allow voboost_restore labeledfs:filesystem remount;
+allow voboost_restore property_socket:sock_file write;
+allow voboost_restore init:unix_stream_socket connectto;
+allow voboost_restore powerctl_prop:property_service set;
+allow voboost_restore toolbox_exec:file { read getattr execute execute_no_trans open map };
+allow voboost_restore shell_exec:file { read getattr execute execute_no_trans open map };
+allow voboost_restore system_file:file { read open getattr execute execute_no_trans map };
+allow voboost_restore system_file:dir { search read open write add_name remove_name getattr };
+allow voboost_restore vendor_file:file { read write open getattr create unlink rename setattr relabelfrom relabelto };
+allow voboost_restore vendor_file:dir { search read open write add_name remove_name getattr };
+allow voboost_restore vendor_configs_file:file { read write open getattr create unlink rename setattr relabelfrom relabelto };
+allow voboost_restore vendor_configs_file:dir { search read open write add_name remove_name getattr };
+# Package-manager client chain, symmetric with voboost_install (v34 diag boot:
+# restore failed on the post-reboot epoch with "open /data/voboost/generations/
+# current: Permission denied" — the restore driver reads the active generation
+# pointer and runs observe_installed_apk in ITS domain):
+allow voboost_restore self:fifo_file { create read write open getattr setattr ioctl };
+allow voboost_restore rootfs:dir { read open getattr };
+allow voboost_restore voboost_generation_file:dir { search read open getattr };
+allow voboost_restore voboost_generation_file:file { read open getattr };
+# v36 diag: restore-runtime-apply re-reads the daemon binary under its
+# committed voboost_exec label and failed with "open /data/voboost/
+# voboost-daemon: Permission denied" (install has the identical grant for
+# its runtime-verify step).
+# v36/v37 diag: restore-runtime-apply re-reads every committed native
+# artifact under its own committed exec label and failed file-by-file with
+# "open /data/voboost/<binary>: Permission denied" (daemon, install, ...).
+# Mirrors the voboost_install runtime-verify grant set: all four labels at
+# once instead of one denial per gate cycle.
+allow voboost_restore voboost_exec:file { read open getattr };
+allow voboost_restore voboost_install_exec:file { read open getattr };
+allow voboost_restore voboost_uninstall_exec:file { read open getattr };
+allow voboost_restore voboost_selinux_exec:file { read open getattr };
+# v39 diag: restore-runtime-apply republishes every root-flat product
+# artifact through a fresh ".<name>.restore-<tx>.tmp" created in /data/voboost
+# (inheriting voboost_data_file) and then copies the committed SELinux
+# context onto it (fsetxattr security.selinux). The census line: "avc:
+# denied { relabelfrom } for name='.voboost-daemon.restore-...tmp'
+# scontext=voboost_restore tcontext=voboost_data_file tclass=file". The
+# relabel needs relabelfrom on the inherited label plus relabelto on each
+# committed exec label — the exact shape init's boot-1 relabeler walk and
+# the SELinux-entrypoint entry already exercise. The .rc / implant / lsplant
+# leaves stay system_file (their committed label) and finish through the
+# same voboost_data_file relabelfrom plus the system_file relabelto below.
+allow voboost_restore voboost_data_file:file relabelfrom;
+# v42 diag: after the relabel the atomic renameat2 publish (.tmp -> live
+# name) replaces the committed artifact and needs rename on the freshly
+# relabelled temp inode, plus unlink on the live inode's committed label it
+# atomically replaces ("avc: denied { rename } ... name='.voboost-daemon.
+# restore-...tmp' tcontext=voboost_exec tclass=file"). Granted for
+# every committed label at once (the v37 batch precedent) so the remaining
+# publish steps cannot stall label-by-label.
+allow voboost_restore voboost_exec:file { rename unlink };
+allow voboost_restore voboost_install_exec:file { rename unlink };
+allow voboost_restore voboost_uninstall_exec:file { rename unlink };
+allow voboost_restore voboost_selinux_exec:file { rename unlink };
+allow voboost_restore system_file:file { rename unlink };
+allow voboost_restore voboost_data_file:file { rename unlink };
+# v43 diag: restore-policy-backup and the inventory-commit stage also
+# publish_exact() through temps created inside /data/voboost/uninstall
+# (voboost_uninstall_data_file), first hit at ".precompiled_sepolicy.
+# orig.restore-<tx>.tmp" ("avc: denied { relabelfrom } ...
+# tcontext=voboost_uninstall_data_file tclass=file"). Same relabel+rename
+# shape as the root-flat publishes, granted for the whole tree at once.
+allow voboost_restore voboost_uninstall_data_file:file { relabelfrom relabelto rename unlink };
+# v44 diag: the inventory-commit stage publishes the restore document
+# members through temps inside recovery/<tx> (voboost_recovery_file),
+# first hit at ".system-artifacts.json.restore-<tx>.tmp" ("avc: denied
+# { relabelfrom } ... tcontext=voboost_recovery_file"). The restore domain
+# already owned read/write/create on this tree; same relabel+rename shape
+# as the other publish roots, granted for the whole tree at once.
+allow voboost_restore voboost_recovery_file:file { relabelfrom relabelto rename unlink };
+allow voboost_restore voboost_exec:file relabelto;
+allow voboost_restore voboost_install_exec:file relabelto;
+allow voboost_restore voboost_uninstall_exec:file relabelto;
+allow voboost_restore voboost_selinux_exec:file relabelto;
+allow voboost_restore voboost_data_file:file relabelto;
+allow voboost_restore system_file:file relabelto;
+# Atomic rollback of the product-owned init service uses one fixed staging name.
+type voboost_init_rollback_file;
+typeattribute voboost_init_rollback_file file_type;
+type_transition voboost_restore system_file:file voboost_init_rollback_file ".voboost.rc.product-rollback.tmp";
+allow { init voboost_restore } voboost_init_rollback_file:file { create open read write getattr setattr relabelfrom unlink };
+# v35 census: the cmd/pm child sets its scheduler policy and servicemanager
+# hands the resolved binder object back ("avc: denied { setsched } ...
+# scontext=voboost_restore tclass=process" / "denied { transfer }
+# scontext=servicemanager tcontext=voboost_restore tclass=binder").
+
+# Fixed descriptor-relative relabel walk plus its one readiness publication.
+allow voboost_relabel voboost_data_file:dir { search read open getattr };
+allow voboost_relabel voboost_data_file:file { read open getattr relabelfrom relabelto };
+# The walk fstatat()s every /data/voboost member to classify it; the daemon
+# leaves a dead unix socket in /data/voboost/run across reboots. The walk
+# deliberately skips it (voboost-selinux.c), but the fstatat still needs
+# getattr first — without it the relabeler aborts (exit 8) before publishing
+# relabel.ready and the whole resume chain never starts after a daemon boot.
+allow voboost_relabel voboost_data_file:sock_file getattr;
+# lock mirrors the system_data_root_file grant: the relabeler flocks the
+# /data/voboost directory fd (open_root_authority_at) and on firmwares whose
+# /data default label is system_data_file the flock denial aborts the walk
+# ("avc: denied { lock } ... scontext=voboost_relabel
+# tcontext=u:object_r:system_data_file:s0 tclass=dir", exit 8, free-09-chinese
+# 6.0.3 emulator) before any entry is relabeled.
+allow voboost_relabel system_data_file:dir { search read open getattr relabelfrom lock };
+allow voboost_relabel system_data_file:file { read open getattr relabelfrom };
+allow voboost_relabel app_data_file:dir { search read open getattr };
+allow voboost_relabel voboost_exec:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_install_exec:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_uninstall_exec:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_selinux_exec:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_operation_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_install_staging_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_install_staging_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_update_staging_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_update_staging_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_recovery_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_recovery_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_agent_state_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_agent_state_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_uninstall_data_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_uninstall_data_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_generation_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_generation_file:file { read open getattr relabelfrom relabelto };
+# The relabel walk descends into daemon-owned install-window staging content
+# (the frozen product closure staged before the second reboot) like the other
+# trusted trees; the app-owned OTA form never descends past the fixed directory.
+allow voboost_relabel voboost_incoming_file:dir { search read open getattr relabelfrom relabelto };
+allow voboost_relabel voboost_incoming_file:file { read open getattr relabelfrom relabelto };
+allow voboost_relabel property_socket:sock_file write;
+allow voboost_relabel init:unix_stream_socket connectto;
+allow voboost_relabel default_prop:property_service set;
+# The stock android-30 base grants none of these to the relabel domain
+# through attributes the way the OEM machine base does.
+allow voboost_relabel self:process getsched;
+# The boot-1 descriptor relabel walk stats and relabels root-owned tree
+# members regardless of their DAC owner (v32 gate: restore stalled at
+# restore-reboot-first/reboot-required; census showed "avc: denied
+# { dac_override }/{ dac_read_search } scontext=voboost_relabel
+# tcontext=voboost_relabel tclass=capability").
+allow voboost_relabel self:capability { dac_override dac_read_search };
+# v33 gate, same stall point: the walk chmods members owned by other uids
+# ("avc: denied { fowner } scontext=voboost_relabel tclass=capability").
+allow voboost_relabel self:capability fowner;
+allow voboost_relabel self:dir search;
+allow voboost_relabel self:lnk_file read;
+allow voboost_relabel self:unix_dgram_socket { create read write connect send_msg };
+# Publishing voboost.relabel.ready=1 talks to the property service over a
+# self-created unix stream socket.
+allow voboost_relabel self:unix_stream_socket { create connect read write getattr };
+allow voboost_relabel voboost_data_file:dir { search read open getattr lock relabelfrom relabelto };
+# The AOSP emulator labels root-owned /data directories (and fresh /data/voboost)
+# system_data_root_file before the fixed walk; the hand-run path exercised the
+# system_data_file form, the emulator boot under Enforcing needs this one.
+allow voboost_relabel system_data_root_file:dir { search read open getattr relabelfrom lock };
+allow voboost_relabel proc:dir search;
+allow voboost_relabel default_prop:file { read open getattr map };
+
+# Native property clients mmap the exact property-area files. Cycle108 proves
+# sys.boot_completed is exported3_system_prop on the supported OEM firmware;
+# its property_contexts labels ro.kernel.qemu exported_default_prop. The latter
+# is read by both native emulator acceptance guards. Absent platform types
+# retain the policy builder's existing skip behavior.
+allow voboost_install exported3_system_prop:file { read open getattr map };
+allow { voboost_install voboost } exported_default_prop:file { read open getattr map };
+
+# ---- Process management ----
+# The daemon needs to query process info (getpidcon, etc.) for safety checks.
+
+# ---- Self sockets and IPC (daemon runtime) ----
+# Root-owned QNX qconn client. Free 6.0.3 TCP/8000 resolves through
+# SECINITSID_PORT to `port` (no explicit portcon). The transport itself pins
+# 172.16.100.22:8000; no listener, proc_net, or general netdomain grant.
+allow voboost self:tcp_socket { create connect read write getopt setopt shutdown };
+allow voboost port:tcp_socket name_connect;
+# Logging (logd socket), property service, and internal IPC.
+allow voboost self:unix_dgram_socket { create bind connect read write send_msg };
+allow voboost self:unix_stream_socket {
+    create bind connect connectto listen accept read write getattr getopt setopt shutdown
+};
+allow voboost self:process { ptrace getsched setsched signal fork getcap setcap setpgid };
+# install-agents phase: the daemon reaps the `pm`/`cmd` children it spawns for
+# the APK session and kills them on timeout
+# ("avc: denied { sigchld } ... scontext=u:r:voboost:s0
+# tcontext=u:r:voboost:s0 tclass=process" and the same for sigkill,
+# free-09-chinese 6.0.3 emulator).
+allow voboost self:process { sigchld sigkill };
+# Boot-1 daemon startup under Enforcing: the pid
+# self-check walks /proc/<own pid> and the capability probe reads getcap;
+# setcap + /proc/self/exe|comm probes fire in the same shared attestation.
+allow voboost self:dir search;
+allow voboost self:lnk_file read;
+allow voboost self:file { read open getattr };
+# install-agents phase: `cmd package` children write /proc/<pid>/timerslack_ns,
+# which carries the spawning domain label
+# ("avc: denied { write } for comm=\"cmd\" name=\"timerslack_ns\"
+# scontext=u:r:voboost:s0 tcontext=u:r:voboost:s0 tclass=file",
+# free-09-chinese 6.0.3 emulator).
+allow voboost self:file write;
+# The uninstall transaction's own pm/cmd children carry the uninstall label
+# and hit the identical per-domain timerslack_ns write, plus the pipe
+# FIONREAD ioctl pm uses on its fixed-process output pipe:
+# ("avc: denied { write } ... scontext=u:r:voboost_uninstall:s0
+#  tcontext=u:r:voboost_uninstall:s0 tclass=file",
+#  "avc: denied { ioctl } for comm=\"pm\" path=\"pipe:[...]\" ioctlcmd=5401
+#  scontext=u:r:voboost_uninstall:s0 tcontext=u:r:voboost_uninstall:s0
+#  tclass=fifo_file", free-09-chinese 6.0.3 emulator).
+allow voboost_uninstall self:file write;
+allow voboost_uninstall self:fifo_file ioctl;
+# Boot-1 daemon startup probes: mount-topology and
+# fixed-process checks read /proc/<pid>/mountinfo and traverse /data,
+# /data/local/tmp and /vendor directory metadata.
+allow voboost system_data_root_file:dir { search read open getattr };
+# The same /data anchor walk (pidfile acquisition opens the /data mount root
+# O_RDONLY|O_DIRECTORY) for firmwares whose /data labels are system_data_file
+# ("avc: denied { read } ... scontext=u:r:voboost:s0
+# tcontext=u:object_r:system_data_file:s0 tclass=dir", free-09-chinese 6.0.3
+# emulator; the uninstaller opens the same anchor at transaction.rs).
+allow voboost system_data_file:dir { search read open getattr };
+# install-agents phase: the daemon confirms the installed APK by reading
+# /data/system/packages.list, which this firmware labels system_data_file
+# instead of packages_list_file
+# ("avc: denied { read } for comm=\"voboost-daemon\" name=\"packages.list\"
+# scontext=u:r:voboost:s0
+# tcontext=u:object_r:system_data_file:s0 tclass=file",
+# free-09-chinese 6.0.3 emulator).
+allow voboost system_data_file:file { read open getattr };
+allow voboost_uninstall system_data_file:dir { search read open getattr };
+allow voboost_restore system_data_file:dir { search read open getattr };
+allow voboost shell_data_file:dir { search read open getattr };
+allow voboost vendor_file:dir { search read open getattr };
+allow voboost_restore system_data_root_file:dir { search read open getattr };
+# Install-agents applies the app APK and its app-op through the OEM
+# /system/bin/pm and /system/bin/appops shell scripts; without the file
+# execute right the apply step cannot even exec the wrapper. The scripts'
+# /system/bin/sh interpreter completes the missing script layer; the
+# execute_no_trans shape matches the voboost_install precedent below.
+allow voboost system_file:file { read getattr execute execute_no_trans open map };
+allow voboost shell_exec:file { read getattr execute execute_no_trans open map };
+# The resident daemon maps installed package identities from
+# /data/system/packages.list while correlating injection targets.
+allow voboost packages_list_file:file { read open getattr };
+# Package-manager client chain:
+# on this API-28 OEM `pm`/`appops` shell through /system/bin/cmd, which talks
+# to system services over binder before the package operation runs (the
+# daemon forks it as a fixed child, so the child stays in voboost).
+# Needs the /dev/binder device, the TCGETS-style ioctl probing on the
+# inherited stdin/stdout pipes, the /proc/<self>/comm self probe and the
+# crash_dump64 helper exec pattern used by service-client domains on this
+# firmware. Same shape as the established voboost_uninstall binder set.
+# The client resolves those services through servicemanager first.
+# Service resolution itself: getService("package") checks the caller against
+# the service's own type (observed on the enforcing emulator, install-agents
+# stall: "avc: denied { find } for ... name=package
+# scontext=u:r:voboost:s0 tcontext=u:object_r:package_service:s0
+# tclass=service_manager" every retry — the generation acknowledgement's
+# installed-APK observation dies here and the activation loops in
+# cleanup-deferred DEGRADED). Same shape as the voboost_uninstall find grant.
+# The bidirectional package dialogue (both binder directions plus the reply
+# rails) lives in the grouped four-domain pm-client block above.
+# Installed-APK observation opens "/" O_DIRECTORY for the descriptor-relative
+# safe open of /data/app/.../base.apk (shared/installed_apk.rs). Observed:
+# "avc: denied { read } ... scontext=u:r:voboost:s0
+# tcontext=u:object_r:rootfs:s0 tclass=dir" — this was the third stall point
+# after the binder grants, looping the accepted-activation cleanup.
+allow voboost rootfs:dir { read open getattr };
+# The same descriptor-relative walk reads the committed APK under
+# /data/app (apk_data_file on this firmware) for the size/sha256/identity
+# check; the daemon also re-reads it for the signer verification.
+# dac_read_search/dac_override are exercised implicitly by the kernel when
+# root DAC-bypasses app-owned staging files; setuid/setgid are unused by the
+# daemon and are deliberately not granted. Remount authority lives only in the
+# teardown domain. Runtime powerctl below is the explicit, code-gated
+# update-reboot compromise; domain compromise can reboot the multimedia system.
+allow voboost self:capability { sys_ptrace dac_read_search dac_override kill chown fsetid net_admin };
+# Installed-application handoff:
+# the daemon adopts the incoming staging directory as the installed app
+# identity (chown+fsetid above) and reads the app's own data directory
+# (/data/user/0/ru.voboost) while verifying the applied application.
+allow voboost app_data_file:dir { search read open getattr };
+allow voboost app_data_file:file { read open getattr };
+
+# Exact Android property-service path used by the resident daemon for the one
+# fixed `ctl.start voboost-uninstall` trigger.  These are the three grants
+# present in the captured f0506h policy for an authorised setprop caller.
+allow voboost property_socket:sock_file write;
+allow voboost init:unix_stream_socket connectto;
+allow voboost ctl_start_prop:property_service set;
+# Committed startup=none self-stop: the resident stops its own init service
+# through the exact `ctl.stop voboost-daemon` property path (the same rail the
+# uninstall one-shot uses below). No generic property authority is granted.
+allow voboost ctl_stop_prop:property_service set;
+# Runtime vehicle profiling and the fixed ctl trigger execute getprop/setprop
+# from the toolbox image; the resident never receives shell/system/vendor
+# filesystem mutation rights.
+allow voboost toolbox_exec:file { read getattr execute execute_no_trans open map };
+
+# Minimal init-owned update reboot executor. It reads only the
+# correlated operation/WAL authority and can set sys.powerctl.
+allow voboost_reboot voboost_exec:file { read getattr execute entrypoint map };
+allow voboost_reboot voboost_operation_file:file { read open getattr };
+allow voboost_reboot voboost_data_file:dir { search getattr };
+allow voboost_reboot voboost_install_staging_file:dir { search read open getattr };
+allow voboost_reboot voboost_update_staging_file:dir { search read open getattr };
+allow voboost_reboot voboost_update_staging_file:file { read open getattr };
+allow voboost_reboot voboost_recovery_file:dir { search read open getattr };
+allow voboost_reboot voboost_recovery_file:file { read open getattr };
+allow voboost_reboot property_socket:sock_file write;
+allow voboost_reboot init:unix_stream_socket connectto;
+allow voboost_reboot powerctl_prop:property_service set;
+
+# ---- voboost-uninstall teardown (isolated one-shot domain) ----
+# voboost-uninstall enters voboost_uninstall via its dedicated exec label and
+# an explicit init service seclabel. It execs tightly bound system tools,
+# remounts / and
+# /vendor (both ext4, i.e. labeledfs for the filesystem class), restores the
+# pristine precompiled_sepolicy into /vendor and removes the rc hook and
+# SELinux program from /system before wiping the zone.
+allow voboost_uninstall self:process { signal fork };
+allow voboost_uninstall self:capability { dac_read_search dac_override kill sys_admin sys_boot };
+# ("avc: denied { sys_boot } scontext=voboost_uninstall tclass=capability").
+# The terminal forced fallback of reboot_terminal() may issue the direct
+# reboot(2) syscall after the init property handshake: init's post-uninstall
+# shutdown path proved non-terminating, so the successor demands the machine
+# restart itself instead of waiting on a wedged init.
+allow voboost_uninstall labeledfs:filesystem remount;
+# The native remount journal captures BLKROGET before changing protection.
+# BLKROSET applies only to the retained block node whose major/minor matches
+# the verified fixed policy/init mount; its original flag is restored after RO.
+# One-shot policy transaction journals original BLKROGET before BLKROSET.
+# No runtime domain receives writable block authority.
+allow { voboost_install voboost_restore } device:dir { search getattr };
+allow { voboost_install voboost_restore } block_device:dir { search getattr };
+allow { voboost_install voboost_restore } block_device:lnk_file { read getattr };
+allow { voboost_install voboost_restore } { block_device system_block_device vendor_block_device }:blk_file { open read getattr ioctl };
+allow { voboost_install voboost_restore } sysfs:dir { search getattr };
+allow { voboost_install voboost_restore } sysfs:lnk_file { read getattr };
+allow { voboost_install voboost_restore } sysfs:file { open read getattr };
+allow voboost_uninstall device:dir { search getattr };
+allow voboost_uninstall block_device:dir { search getattr };
+allow voboost_uninstall block_device:lnk_file { read getattr };
+allow voboost_uninstall block_device:blk_file { open read getattr ioctl };
+allow voboost_uninstall { system_block_device vendor_block_device }:blk_file { open read getattr ioctl };
+# /dev/root may be absent; bounded kernel-owned uevent supplies DEVNAME,
+# which is checked against the selected mount before any block ioctl.
+allow voboost_uninstall sysfs:dir { search getattr };
+allow voboost_uninstall sysfs:lnk_file { read getattr };
+allow voboost_uninstall sysfs:file { open read getattr };
+# The filesystem class takes the SUPERBLOCK type — the label of the fs root
+# dentry (`ls -Zd /vendor` -> u:object_r:vendor_file:s0 on free-09-chinese
+# 6.0.3), not labeledfs: labeledfs covers only unlabeled filesystems, so the
+# grant above never matched the ext4 /system|/vendor boundaries. The terminal
+# uninstall phase therefore died on its first remount with errno 13
+# ("uninstall.phase: remount fixed boundary /vendor: Permission denied",
+# recovery/.../diag.log) while carrying u:r:voboost_uninstall:s0 with a full
+# CapEff including sys_admin; the avtab has no
+# (voboost_uninstall -> vendor_file:filesystem) entry (policydb inspection).
+# install and restore remount the same boundaries in their own phases.
+allow { voboost_install voboost_restore voboost_uninstall } vendor_file:filesystem remount;
+allow { voboost_install voboost_restore voboost_uninstall } system_file:filesystem remount;
+# The superblock sid is FIXED AT MOUNT TIME from the fs-root label as it was
+# during boot's init mount_all — BEFORE restorecon applied vendor_file to the
+# root dentry — so the /vendor and /system superblocks live as `unlabeled`
+# for the filesystem class for the whole boot (libsepol compute_av on the
+# loaded policy: voboost_uninstall -> unlabeled:filesystem remount = DENY,
+# while vendor_file/labeledfs grants were already ALLOWED and the remount
+# still failed with errno 13: "remount target=/vendor ... flags=0x20 rc=-1
+# errno=13 self=u:r:voboost_uninstall:s0" in remount-dbg.log, v150). The
+# permissive su domain is why shell-side remounts always worked.
+allow { voboost_install voboost_restore voboost_uninstall } unlabeled:filesystem remount;
+allow voboost_uninstall shell_exec:file { read getattr execute execute_no_trans open map };
+allow voboost_uninstall toolbox_exec:file { read getattr execute execute_no_trans open map };
+# Child-process pipes (vehicle-profile probing shells out to toolbox/getprop).
+allow voboost self:fifo_file { create read write open getattr setattr ioctl };
+allow voboost_uninstall self:fifo_file { create read write open getattr setattr };
+# getprop inside the vehicle-profile probe reads property files.
+allow voboost default_prop:file { read open getattr map };
+allow voboost system_prop:file { read open getattr map };
+# ART and the fixed Java courier read these exported property areas during startup.
+allow voboost exported_dalvik_prop:file { read open getattr map };
+allow voboost exported2_system_prop:file { read open getattr map };
+allow voboost vendor_prop:file { read open getattr };
+# Android 9 stores init.svc.voboost-resource-uninstall-resume in the
+# default property area, which getprop maps read-only for uninstall preflight.
+allow voboost_uninstall default_prop:file { read open getattr map };
+allow voboost_uninstall system_prop:file { read open getattr };
+allow voboost_uninstall vendor_prop:file { read open getattr };
+allow voboost_uninstall system_file:file { getattr read write open create unlink rename setattr relabelfrom relabelto };
+# `/system/bin/pm` is a stock system_file wrapper on the exact f0506h 6.0.3
+# policy. The bounded package removal path needs only execution of that fixed
+# wrapper; vendor_file receives no execution authority.
+allow voboost_uninstall system_file:file { execute execute_no_trans map };
+allow voboost_uninstall system_file:dir { search read open write add_name remove_name getattr };
+allow voboost_uninstall vendor_file:file { getattr read write open create unlink rename setattr relabelfrom relabelto };
+allow voboost_uninstall vendor_file:dir { search read open write add_name remove_name getattr };
+# This firmware's /vendor/etc/selinux directory (and its precompiled policy)
+# carries the vendor_configs_file type instead of the AOSP vendor_file.
+allow voboost_uninstall vendor_configs_file:file { getattr read write open create unlink rename setattr relabelfrom relabelto };
+allow voboost_uninstall vendor_configs_file:dir { search read open write add_name remove_name getattr };
+
+# Exact `ctl.stop voboost-daemon` path used by the one-shot before touching
+# persistent state.  No generic/default property authority is granted.
+allow voboost_uninstall property_socket:sock_file write;
+allow voboost_uninstall init:unix_stream_socket connectto;
+allow voboost_uninstall ctl_stop_prop:property_service set;
+allow voboost_uninstall ctl_start_prop:property_service set;
+allow voboost_uninstall powerctl_prop:property_service set;
+
+# `pm uninstall ru.voboost` from voboost-uninstall: pm is a
+# shell wrapper around app_process talking to system_server over binder.
+# The outcome is klog'ed either way.  This remains a vehicle-only Enforcing
+# gate because host policy construction cannot exercise PackageManager binder.
+allow voboost_uninstall self:binder { call transfer };
+allow voboost_uninstall servicemanager:binder { call transfer };
+allow voboost_uninstall system_server:binder { call transfer };
+allow voboost_uninstall servicemanager:service_manager { list find };
+allow voboost_uninstall system_data_file:dir { search getattr read open };
+allow voboost_uninstall system_data_file:file { getattr read open };
+# Exact launcher cache namespace cleanup, anchored and UID-checked by native code.
+# This domain grant is not pathname-specific; stock su permissions are unchanged.
+allow voboost_uninstall app_data_file:dir { search getattr open read write remove_name };
+allow voboost_uninstall app_data_file:file { getattr unlink };
+allow voboost_uninstall app_data_file:lnk_file { getattr unlink };
+# OEM launcher data may use a platform/privileged app label.
+allow voboost_uninstall system_app_data_file:dir { search getattr open read write remove_name };
+allow voboost_uninstall system_app_data_file:file { getattr unlink };
+allow voboost_uninstall system_app_data_file:lnk_file { getattr unlink };
+allow voboost_uninstall privapp_data_file:dir { search getattr open read write remove_name };
+allow voboost_uninstall privapp_data_file:file { getattr unlink };
+allow voboost_uninstall privapp_data_file:lnk_file { getattr unlink };
+allow voboost_uninstall system_data_file:lnk_file { read getattr };
+allow voboost_uninstall system_data_file:file relabelfrom;
+# The fixed signed QNX courier uses ART in the daemon domain as well.
+allow { voboost voboost_uninstall } dalvikcache_data_file:dir { search getattr };
+allow { voboost voboost_uninstall } dalvikcache_data_file:file { read open getattr execute map };
+allow { voboost voboost_uninstall } zygote_exec:file { read getattr open execute execute_no_trans map };
+allow voboost_uninstall proc:file { read open getattr };
+allow voboost_uninstall rootfs:dir { search getattr };
+# Installed-APK authority reads (transaction/package.rs): pm path + direct
+# open_regular_nofollow("/data/app/.../base.apk") for the signer verify —
+# the traversal parents (/data = system_data_root_file, /data/app = apk_data_
+# file) and the APK file itself, plus the reverse binder rails the pm child
+# dialogue needs (fd use / fifo write into its stdout pipes), symmetric with
+# voboost_install and voboost_restore.
+allow voboost_uninstall system_data_root_file:dir search;
+# voboost-uninstall gains the shared client-chain rules through the grouped
+# four-domain block above; its own wider binder/service-manager set (self
+# binder, servicemanager { call transfer }, service_manager { list find })
+# stays here because the other domains deliberately do not receive it.
+# Symmetry grants (v37 batch precedent): the setsched self-tuning of the pm
+# child and the crash_dump helper exec, already proven by install/restore/
+# runtime on the enforcing emulator, are granted here preventively so a
+# future uninstall gate cannot stall on the same denials.
+allow voboost_uninstall tmpfs:dir { search getattr };
+allow voboost_uninstall tmpfs:file { read open getattr };
+allow voboost_uninstall ashmem_device:chr_file { open read write getattr map };
+
+# Exact daemon-process verification for the stop-before-teardown gate.
+allow voboost_uninstall voboost:process signal;
+allow voboost_uninstall voboost:dir { search read open getattr };
+allow voboost_uninstall voboost:file { read open getattr };
+allow voboost_uninstall voboost:lnk_file { read open getattr };
+
+# Path traversal through /data parents while resolving app paths.
+allow voboost app_data_file:dir { search getattr };
+allow voboost system_data_file:lnk_file { read getattr };
+# The same /data/user/0 symlink traversal for the install and restore
+# domains ("avc: denied { read } ... comm=voboost-install
+# tcontext=u:object_r:system_data_file:s0 tclass=lnk_file").
+allow voboost_install system_data_file:lnk_file { read getattr };
+allow voboost_restore system_data_file:lnk_file { read getattr };
+allow voboost_uninstall system_data_file:lnk_file { read getattr };
+
+# ---- File system access ----
+# Read access to the top-level procfs inventory and non-target-specific files.
+# Target-labeled PID contents are restricted to the injection targets and the read-only
+# servicemanager identity probe below.
+allow voboost proc:dir { search read open };
+allow voboost proc:file { read open getattr };
+# Native bootstrap inventories PID ownership before selecting UID 1000.
+# stat only: no foreign directory traversal or cmdline reads are granted.
+allow voboost domain:dir getattr;
+# UID 1000 also owns servicemanager; identifying it excludes it from the OEM CAN service.
+# No directory inventory, ptrace, writes or signals are granted to this domain.
+allow voboost servicemanager:dir search;
+allow voboost servicemanager:file { open read getattr };
+# OEM /private mounts may retain tmpfs on their root directory. Only traverse it
+# to the separately permitted OEM account and settings data; no tmpfs file access.
+allow voboost tmpfs:dir search;
+# OEM protocol 21 is classified as netlink_crypto_socket by SELinux.
+# This endpoint only receives kernel CAN feedback; it never sends netlink messages.
+# Receive-only capture sizes and reads back its kernel queue; no netlink send rights.
+allow voboost self:netlink_crypto_socket { create bind read setopt getopt };
+# Read-only hardware coding resolves the exact /dev/block/vdh node.
+# Directory traversal does not grant access to any block device contents.
+allow voboost block_device:dir search;
+# Retained f0506h OEM vendor contexts label only /dev/block/vdh as vdh_device.
+# The hardware coding probe is read-only; the OEM type is optional on other platforms.
+allow voboost vdh_device:blk_file { open read getattr };
+# Install caches hardware coding before publishing init; it never mutates the NV node.
+allow voboost_install vdh_device:blk_file { open read getattr };
+# Owned OEM CAN descriptor: TX uses request 1, never arbitrary ioctls.
+allow voboost can_device:chr_file { open read write getattr ioctl };
+allowxperm voboost can_device:chr_file ioctl { 0x0001 };
+
+# The process watcher sweeps the whole /proc table every poll cycle; entries
+# labeled with other domains' contexts (kernel, init, vendor_init) fail the
+# read BY DESIGN and the watcher skips them as non-candidates (process_
+# watcher.rs). Under Enforcing each skip emits an AVC — tens of thousands per
+# gate run — which saturates the audit log and masks the denials that matter
+# (it hid the real v79 terminal-cleanup AVCs until the init-service log was
+# read directly). These expected skips are silenced, never granted: allowing
+# read on foreign domains is a target-surface leak the roundtrip test rejects.
+dontaudit voboost kernel:file read;
+dontaudit voboost init:file read;
+dontaudit voboost vendor_init:file read;
+
+# App identity fallback for prepare_agent_incoming: when the pm probe's
+# binder dialogue is unavailable, the install reads the ownership of the
+# app's installd-created user-0 private data directory instead.
+allow voboost_install system_data_file:dir { search getattr };
+
+# ---- Install-ack APK identity probe (filesystem fallback) ----
+# observe_installed_apk verifies the installed base APK by size+sha256 before
+# the install-agents acknowledgement. The primary probe shells out to pm; on
+# OEM policiеs where the daemon domain's servicemanager binder dialogue is
+# denied, the filesystem fallback scans /data/app/ru.voboost-*/base.apk and
+# validates the same identity directly. The scan needs directory read on the
+# apk prefix and file open/read on the base APK itself:
+allow voboost apk_data_file:dir { search read open getattr };
+allow voboost apk_data_file:file { read open getattr };
+
+# ---- Desktop management channel from the rooted-adbd (su) domain ----
+# The desktop CLI drives the device through adbd rooted via `adb root`. On
+# AOSP images that su domain is unconfined and every probe passes; on OEM car
+# builds it is bounded and denies both reads of the operation journal and any
+# execution of retained entrypoints. Post-install management (operation
+# observation, --status, the durable desktop uninstall request, startup-mode
+# switches, log export) must work under Enforcing on both, so the patched
+# policy grants the channel explicitly: reads of the operation journal, and
+# domain transitions into the proper voboost domains when the CLI executes
+# the retained entrypoints — management code never runs in the omnipotent
+# su domain.
+allow su voboost_data_file:dir { search getattr };
+allow su voboost_operation_file:file { getattr open read write lock };
+# The fallback (su-domain) management channel also reads the transaction
+# journals and staged recovery artifacts under recovery/<id>/ to compute the
+# installed content identity, and the CLI's half-install abort discovers the
+# pristine policy backup by listing that tree. Read-only: the restore-owned
+# write plane stays with voboost_restore.
+allow su voboost_recovery_file:dir { search getattr open read };
+allow su voboost_recovery_file:file { getattr open read };
+# The installed-content probe also verifies the terminal-cleanup state of
+# install/ (opens the staging root and any residue transaction directory),
+# the committed uninstall inventory under uninstall/ (snapshot documents and
+# the init archive), and every root-flat artifact's bytes — including the
+# SELinux policy program and the install entrypoint. Without these read-only
+# grants the probe dies at "open terminal install root: Permission denied"
+# and the installer reports "installed content identity is unavailable"
+# (proved on the free-09-chinese 6.0.3 emulator, Enforcing). Staging writes
+# stay with voboost_install; uninstall-tree writes stay with voboost_uninstall.
+allow su voboost_install_staging_file:dir { search getattr open read };
+allow su voboost_uninstall_data_file:dir { search getattr open read };
+allow su voboost_uninstall_data_file:file { getattr open read };
+allow su voboost_install_exec:file { getattr open read };
+allow su voboost_selinux_exec:file { getattr open read };
+# Management probes inspect the resident process and its installed executable.
+# Procfs executable links carry the process domain, not the executable file type.
+allow su voboost:process { getattr signal };
+allow su voboost_exec:lnk_file { getattr read };
+type_transition su voboost_exec:process voboost;
+allow su voboost_exec:file { entrypoint read execute execute_no_trans open getattr map };
+allow su voboost:process { transition noatsecure siginh rlimitinh };
+# /data is mounted nosuid and no target policy declares the process2 class
+# (policycap nnp_nosuid_transition=0 on both the car and the emulator), so the
+# kernel resolves the transition through security_bounded_transition: the
+# voboost domains are bounded by init, never by su, and check_nnp_nosuid
+# silently falls back to executing in the caller's domain. The read-only
+# management channel (inspect/status/log export/uninstall request relay) then
+# needs execute_no_trans on the daemon entrypoint (proved with runcon on the
+# free-09-chinese 6.0.3 emulator: a forced transition is denied even under
+# permissive, while the fallback exec in the su domain works). The signed
+# uninstall entrypoint deliberately gets NO execute_no_trans: it must only
+# ever run inside the voboost_uninstall domain, and the desktop request is
+# relayed through the daemon. Inert process2 nosuid_transition grants were
+# removed: the class does not exist in any target policy.
+# adbd (su) waits on the exec'd management process: the kernel's
+# selinux_task_wait checks the reversed child->tracer sigchld pair, and the
+# voboost domains are bounded by init, so the init mirror keeps the grant
+# inside the bounds hierarchy on OEM policies.
+allow voboost su:process sigchld;
+allow init su:process sigchld;
+# Authenticate signed management peers that execute in the firmware su domain.
+# Peer inspection grants neither tracing nor writes to the peer process.
+allow voboost su:dir search;
+allow voboost su:file { open read getattr };
+allow voboost su:lnk_file read;
+allow su voboost_data_file:sock_file write;
+allow su voboost:unix_stream_socket connectto;
+
+# Fixed launcher cache cleanup observes process identity and rejects any
+# product-mapped launcher not covered by the root-owned quiescence receipt.
+allow voboost_uninstall domain:dir { search read open getattr };
+allow voboost_uninstall domain:file { read open getattr };
+# The exact daemon inventory resolves /proc/<pid>/exe for every process.
+# These magic links carry the owning process domain; readlink needs read,
+# independently of the existing proc file and directory permissions.
+# Read-only inventory does not grant attach, write, signal or execution.
+allow voboost_uninstall domain:lnk_file read;
+
+# Retained directory handles start at /, and process inventory starts at /proc.
+allow voboost_uninstall rootfs:dir { open read search getattr };
+allow voboost_uninstall proc:dir { open read search getattr };
+
+# /data is an opened ancestor in the retained launcher cache directory chain.
+allow voboost_uninstall system_data_root_file:dir { open read search getattr };
+
+# Kernel ptrace_may_access READ for UID-1000 launcher proc maps.
+# No process:ptrace rule is granted to this teardown role.
+allow voboost_uninstall self:capability sys_ptrace;
+
+# Fixed root-owned user-0 APK admission and scheduler recovery. Existing
+# package and Binder reply grants apply; no su or app mutation grant is added.
+allow voboost { activity_service jobscheduler_service user_service }:service_manager find;
+# Required init bounds mirror for the fixed service lookup chain.
+allow init { activity_service jobscheduler_service user_service }:service_manager find;
+
+# Normal resource lifecycle only. No early-init service or new capability.
+type voboost_resource_overlay_file;
+typeattribute voboost_resource_overlay_file file_type;
+typeattribute voboost_resource_overlay_file vendor_file_type;
+# The only created files are born with our label, avoiding writes/relabel of OEM overlays.
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-setting-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-setting-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-launcher-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-launcher-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-vehiclesetting-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-vehiclesetting-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-settingnetwork-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-settingnetwork-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-systemui-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-systemui-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-bluetoothphone-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-bluetoothphone-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-media-ru.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-media-ru-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-setting-en-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-launcher-en.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-launcher-en-a11.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-systemui-en.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-media-en.apk.staged";
+type_transition voboost_install vendor_overlay_file:file voboost_resource_overlay_file ".voboost-media-en-a11.apk.staged";
+allow voboost_install vendor_overlay_file:dir { search read open write add_name remove_name getattr };
+allow voboost_install voboost_resource_overlay_file:file { read open getattr create write setattr rename unlink relabelfrom relabelto };
+allow { voboost_restore voboost_uninstall } vendor_overlay_file:dir { search read open write remove_name getattr };
+allow { voboost_restore voboost_uninstall } voboost_resource_overlay_file:file { read open getattr unlink };
+allow voboost vendor_overlay_file:dir { search read open getattr };
+allow voboost voboost_resource_overlay_file:file { read open getattr };
+# init bounds mirrors apply to our file type, not all OEM overlay files.
+allow init vendor_overlay_file:dir { search read open write add_name remove_name getattr };
+allow init voboost_resource_overlay_file:file { read open getattr create write setattr rename unlink relabelfrom relabelto };
+allow { voboost voboost_restore voboost_uninstall } overlay_service:service_manager find;
+allow { voboost_restore voboost_uninstall } activity_service:service_manager find;
+allow init overlay_service:service_manager find;
+# PackageManager and target app asset loading read only this public owned resource.
+allow { system_server appdomain } voboost_resource_overlay_file:file { read open getattr map };
+# idmap reads our overlay APK when generating its idmap.
+allow idmap voboost_resource_overlay_file:file { read open getattr map };
+# Owner-approved journal317 admission (G04 granted 2026-10-25). Automatic review
+# rejection is lifted by the explicit owner decision recorded in run-01.
+# Actual AVC: voboost_install create .product-manifest.json.tmp -> voboost_data_file.
+type voboost_resource_journal_file;
+typeattribute voboost_resource_journal_file file_type;
+typeattribute voboost_resource_journal_file data_file_type;
+type_transition voboost_install voboost_data_file:dir
+    voboost_resource_journal_file "i18n-resource-transaction";
+allow voboost_install voboost_resource_journal_file:dir { create setattr };
+allow { init voboost_install voboost voboost_restore voboost_uninstall } voboost_resource_journal_file:dir { search read open getattr write add_name remove_name lock };
+allow { init voboost_install voboost voboost_restore voboost_uninstall } voboost_resource_journal_file:file { create read write open getattr setattr rename unlink };
+# ART maps the signed cleanup DEX retained inside the protected journal.
+allow { init voboost voboost_restore voboost_uninstall } voboost_resource_journal_file:file map;
+allow init voboost_resource_journal_file:dir { create setattr };
+# The signed uninstaller removes the resource transaction tree after verifying package absence.
+allow { init voboost_uninstall } voboost_resource_journal_file:dir rmdir;
+# Relabel walker and init bounds only; su permission must be individually justified.
+allow { init voboost_relabel } voboost_resource_journal_file:dir { search read open getattr relabelfrom relabelto };
+allow { init voboost_relabel } voboost_resource_journal_file:file { read open getattr relabelfrom relabelto };

@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "daemon": "1.0.0-beta1",
+  "daemon": "1.0.0-beta3",
   "agents": [
     {
       "id": "stub-agent",
       "channel": "agents",
       "file": "stub-agent.dex",
       "sha256": "515410125b23de51bcbfde29767c9e8e30730871987134124b1c26c6000683c4",
-      "process": "system_server",
+      "process": "com.example.systemservice",
       "boot": false
     }
   ]

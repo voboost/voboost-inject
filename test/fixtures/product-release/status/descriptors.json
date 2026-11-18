@@ -1,0 +1,1 @@
+{"manifestFd":10,"signatureFd":11,"artifacts":[{"fd":12,"file":"voboost-daemon","size":2,"sha256":"1111111111111111111111111111111111111111111111111111111111111111"},{"fd":13,"file":"agent-settings.dex","size":17,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]}
